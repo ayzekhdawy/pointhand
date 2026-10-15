@@ -8,6 +8,15 @@ New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
 foreach ($entry in @("client/dist", "bin/windows/x64/pointhand-computer-use.exe", "bin/windows/x64/manifest.json")) {
     if (-not (Test-Path -LiteralPath (Join-Path $projectRoot $entry))) { throw "Build first: missing $entry" }
 }
+$binaryBytes = [IO.File]::ReadAllBytes((Join-Path $projectRoot "bin/windows/x64/pointhand-computer-use.exe"))
+foreach ($encoding in @([Text.Encoding]::UTF8, [Text.Encoding]::Unicode)) {
+    $binaryText = $encoding.GetString($binaryBytes)
+    foreach ($privateRoot in @($env:USERPROFILE, $env:USERPROFILE.Replace('\', '/'))) {
+        if ($privateRoot -and $binaryText.Contains($privateRoot)) {
+            throw "Host contains a private builder path. Rebuild with scripts/build-windows.ps1."
+        }
+    }
+}
 New-Item -ItemType Directory -Path (Join-Path $packageRoot "client") -Force | Out-Null
 foreach ($entry in @("package.json", "package-lock.json", "dist")) {
     Copy-Item -LiteralPath (Join-Path $projectRoot "client/$entry") -Destination (Join-Path $packageRoot "client") -Recurse

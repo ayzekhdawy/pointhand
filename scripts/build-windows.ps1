@@ -7,6 +7,17 @@ if (-not (Test-Path -LiteralPath $cargo)) {
     throw "Rust cargo was not found at $cargo. Install rustup, then run this script again."
 }
 
+$previousEncodedFlags = $env:CARGO_ENCODED_RUSTFLAGS
+# Panic locations and linker debug records must not disclose the builder's home.
+# Cargo's encoded form preserves paths containing spaces without shell quoting.
+$publicFlags = @(
+    "--remap-path-prefix=$env:USERPROFILE=/build/user",
+    "--remap-path-prefix=$root=/build/pointhand",
+    "-C", "link-arg=/PDBALTPATH:pointhand.pdb"
+) -join [char]31
+$env:CARGO_ENCODED_RUSTFLAGS = if ($previousEncodedFlags) {
+    $previousEncodedFlags + [char]31 + $publicFlags
+} else { $publicFlags }
 Push-Location (Join-Path $root "host")
 try {
     & $cargo build --release
@@ -14,6 +25,7 @@ try {
 }
 finally {
     Pop-Location
+    $env:CARGO_ENCODED_RUSTFLAGS = $previousEncodedFlags
 }
 
 $out = Join-Path $root "bin\windows\x64"
