@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add a repeatable manual physical-mouse interruption test; verify active drawing cancellation and released button state on the secondary virtual display.
+
 - Pace overlay frames with an independent waitable timer; input stops do not shut down the renderer.
 - Report per-monitor bounds/effective DPI and per-window DPI; add an interactive mixed-DPI test for extended displays.
 - Correct one-pixel pointer/stroke drift by targeting absolute-coordinate pixel centers, and confirm real foreground activation before injecting input.
