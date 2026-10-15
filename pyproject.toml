@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pointhand"
+version = "0.2.0"
+description = "Windows computer-use MCP server. TypeScript client, Rust host, and a Python front door."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = ["mcp>=1.2", "pillow>=10", "comtypes>=1.4"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+pointhand = "pointhand.server:main"
+
+[tool.setuptools]
+packages = ["pointhand"]

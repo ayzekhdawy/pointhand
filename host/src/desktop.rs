@@ -1,0 +1,1780 @@
+//! Desktop operations: windows, input, screenshots, and the accessibility tree.
+//!
+//! Screenshots are of the visible desktop at the window rectangle. Covered
+//! windows show whatever is in front of them; `activate_window` brings the
+//! target forward first when a shot is requested.
+
+use std::fs;
+use std::path::PathBuf;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use base64::Engine;
+use serde_json::{json, Value};
+use uiautomation::inputs::{Mouse, MouseButton};
+use uiautomation::patterns::{
+    UIExpandCollapsePattern, UIInvokePattern, UIScrollItemPattern, UIScrollPattern, UIValuePattern,
+};
+use uiautomation::screenshots::Screenshot;
+use uiautomation::types::{Point, Rect};
+use uiautomation::{UIAutomation, UIElement, UITreeWalker};
+use windows::core::{BOOL, PCWSTR, PWSTR};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM};
+use windows::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+};
+use windows::Win32::UI::HiDpi::{
+    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
+use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetForegroundWindow, GetSystemMetrics, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, SetForegroundWindow,
+    ShowWindow, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    SW_RESTORE, SW_SHOWNORMAL,
+};
+
+const MAX_NODES: usize = 400;
+const MAX_DEPTH: usize = 14;
+const MAX_CHILDREN: usize = 64;
+
+struct CachedNode {
+    element: UIElement,
+    line: String,
+}
+
+pub struct Session {
+    automation: UIAutomation,
+    walker: UITreeWalker,
+    cache_hwnd: isize,
+    nodes: Vec<CachedNode>,
+}
+
+impl Session {
+    pub fn new() -> Result<Self, String> {
+        unsafe {
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
+        let automation = UIAutomation::new().map_err(|err| err.to_string())?;
+        let walker = automation
+            .get_control_view_walker()
+            .map_err(|err| err.to_string())?;
+        Ok(Self {
+            automation,
+            walker,
+            cache_hwnd: 0,
+            nodes: Vec::new(),
+        })
+    }
+
+    pub fn list_windows(&self, query: &str) -> Result<Value, String> {
+        let needle = query.to_ascii_lowercase();
+        let mut rows = Vec::new();
+        for hwnd in top_level_windows() {
+            let Some(info) = describe(hwnd) else { continue };
+            if info.pid == std::process::id() {
+                continue;
+            }
+            if !needle.is_empty() && !info.title.to_ascii_lowercase().contains(&needle) {
+                continue;
+            }
+            rows.push(info.to_json());
+        }
+        Ok(Value::Array(rows))
+    }
+
+    pub fn list_apps(&self, query: &str, include_start_menu: bool) -> Result<Value, String> {
+        let windows = self.list_windows("")?;
+        let mut groups: Vec<Value> = Vec::new();
+        if let Some(items) = windows.as_array() {
+            for window in items {
+                let app = window
+                    .get("app")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let title = window.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(group) = groups
+                    .iter_mut()
+                    .find(|group| group.get("id").and_then(|v| v.as_str()) == Some(app.as_str()))
+                {
+                    if let Some(list) = group.get_mut("windows").and_then(|v| v.as_array_mut()) {
+                        list.push(window.clone());
+                    }
+                    let _ = title;
+                } else {
+                    let display = std::path::Path::new(&app)
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .unwrap_or(title);
+                    groups.push(json!({
+                        "id": app,
+                        "displayName": display,
+                        "isRunning": true,
+                        "windows": [window],
+                    }));
+                }
+            }
+        }
+        if include_start_menu {
+            groups.extend(start_menu(query));
+        }
+        let needle = query.to_ascii_lowercase();
+        if !needle.is_empty() {
+            groups.retain(|app| {
+                let name = app
+                    .get("displayName")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let id = app
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                name.contains(&needle) || id.contains(&needle)
+            });
+        }
+        Ok(Value::Array(groups))
+    }
+
+    pub fn get_window(&self, window_id: i64) -> Result<Value, String> {
+        describe(window_id as isize)
+            .map(|info| info.to_json())
+            .ok_or_else(|| format!("window {window_id} is not open"))
+    }
+
+    pub fn activate(&mut self, window_id: i64) -> Result<Value, String> {
+        self.guard_input(window_id)?;
+        focus(window_id as isize)?;
+        self.get_window(window_id)
+    }
+
+    pub fn window_state(
+        &mut self,
+        window_id: i64,
+        shot: bool,
+        text: bool,
+        scale: f32,
+    ) -> Result<Value, String> {
+        self.ensure_allowed(window_id)?;
+        let info = describe(window_id as isize)
+            .ok_or_else(|| format!("window {window_id} is not open"))?;
+        if shot {
+            self.guard_input(window_id)?;
+            focus(window_id as isize)?;
+            thread::sleep(Duration::from_millis(120));
+        }
+        let mut result = json!({ "window": info.to_json(), "accessibility": null });
+        if text {
+            let tree = self.snapshot(window_id as isize)?;
+            result["accessibility"] = json!({ "tree": tree });
+        }
+        if shot {
+            let rect = Rect::new(info.left, info.top, info.right, info.bottom);
+            let (png, effective, width, height) = capture_png(rect, scale)?;
+            result["screenshot"] = json!({
+                "png_base64": png,
+                "scale": effective,
+                "width": width,
+                "height": height,
+                "note": format!(
+                    "window pixel (px,py) -> screen ({left}+px/{scale:.3}, {top}+py/{scale:.3})",
+                    left = info.left, top = info.top, scale = effective
+                ),
+            });
+        }
+        Ok(result)
+    }
+
+    /// Whole-desktop (or region) screenshot. Coordinates in the image map back with
+    /// `screen = origin + pixel / scale`, where origin is the region's top-left.
+    pub fn screenshot(&mut self, params: &Value) -> Result<Value, String> {
+        let (origin_x, origin_y, width, height) = virtual_screen();
+        let scale = params.get("scale").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32;
+        let (left, top, right, bottom) = match params.get("region").and_then(|v| v.as_array()) {
+            Some(region) if region.len() == 4 => {
+                let value = |index: usize| {
+                    region[index]
+                        .as_i64()
+                        .ok_or_else(|| "region must hold four integers".to_string())
+                };
+                let left = (value(0)? as i32).clamp(origin_x, origin_x + width);
+                let top = (value(1)? as i32).clamp(origin_y, origin_y + height);
+                let right = (value(2)? as i32).clamp(origin_x, origin_x + width);
+                let bottom = (value(3)? as i32).clamp(origin_y, origin_y + height);
+                if right <= left || bottom <= top {
+                    return Err("region is empty after clamping to the screen".into());
+                }
+                (left, top, right, bottom)
+            }
+            Some(_) => return Err("region must be [left, top, right, bottom]".into()),
+            None => (origin_x, origin_y, origin_x + width, origin_y + height),
+        };
+        let (png, effective, out_w, out_h) =
+            capture_png(Rect::new(left, top, right, bottom), scale)?;
+        Ok(json!({
+            "screenshot": {
+                "png_base64": png,
+                "scale": effective,
+                "width": out_w,
+                "height": out_h,
+                "origin": [left, top],
+                "note": format!(
+                    "image pixel (px,py) -> screen ({left}+px/{scale:.3}, {top}+py/{scale:.3})",
+                    left = left, top = top, scale = effective
+                ),
+            }
+        }))
+    }
+
+    pub fn click(&mut self, params: &Value) -> Result<Value, String> {
+        let (x, y, window_id) = self.resolve_point(params)?;
+        if let Some(id) = window_id {
+            self.guard_input(id)?;
+            focus(id as isize)?;
+        } else {
+            self.guard_point(x, y)?;
+        }
+        let button = params
+            .get("button")
+            .or_else(|| params.get("mouse_button"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("left");
+        let count = params
+            .get("count")
+            .or_else(|| params.get("click_count"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1);
+        let mouse = Mouse::new().move_time(40).interval(16);
+        let button = match button {
+            "left" | "l" => MouseButton::LEFT,
+            "right" | "r" => MouseButton::RIGHT,
+            "middle" | "m" => MouseButton::MIDDLE,
+            _ => return Err("unknown mouse button".into()),
+        };
+        if !(1..=2).contains(&count) {
+            return Err("click count must be 1 or 2".into());
+        }
+        crate::motion::move_pointer(x, y, instant_motion(params)?)?;
+        for index in 0..count {
+            ensure_point_allowed(x, y)?;
+            crate::check_running()?;
+            mouse.click_button(button).map_err(|e| e.to_string())?;
+            if index + 1 < count {
+                crate::timing::sleep(Duration::from_millis(60))?;
+            }
+        }
+        crate::overlay::signal(x, y, true);
+        note_injection();
+        Ok(json!({"clicked": [x, y]}))
+    }
+
+    pub fn move_to(&mut self, params: &Value) -> Result<Value, String> {
+        let (x, y, window_id) = self.resolve_point(params)?;
+        if let Some(id) = window_id {
+            self.guard_input(id)?;
+            focus(id as isize)?;
+        } else {
+            self.guard_point(x, y)?;
+        }
+        crate::motion::move_pointer(x, y, instant_motion(params)?)?;
+        note_injection();
+        crate::overlay::signal(x, y, false);
+        Ok(json!({"moved": [x, y]}))
+    }
+
+    pub fn drag(&mut self, params: &Value) -> Result<Value, String> {
+        let window_id = params.get("window_id").and_then(|v| v.as_i64());
+        let x1 = int_key(params, &["x1", "from_x"])?;
+        let y1 = int_key(params, &["y1", "from_y"])?;
+        let x2 = int_key(params, &["x2", "to_x"])?;
+        let y2 = int_key(params, &["y2", "to_y"])?;
+        let (start, end) = match window_id {
+            Some(id) => {
+                self.guard_input(id)?;
+                let info =
+                    describe(id as isize).ok_or_else(|| format!("window {id} is not open"))?;
+                focus(id as isize)?;
+                (
+                    Point::new(
+                        info.left.checked_add(x1).ok_or("drag x out of range")?,
+                        info.top.checked_add(y1).ok_or("drag y out of range")?,
+                    ),
+                    Point::new(
+                        info.left.checked_add(x2).ok_or("drag x out of range")?,
+                        info.top.checked_add(y2).ok_or("drag y out of range")?,
+                    ),
+                )
+            }
+            None => {
+                self.guard_point(x1, y1)?;
+                (Point::new(x1, y1), Point::new(x2, y2))
+            }
+        };
+        let dense = densify(
+            &[(start.get_x(), start.get_y()), (end.get_x(), end.get_y())],
+            6,
+        )?;
+        stroke(&dense)?;
+        Ok(json!({"dragged": true}))
+    }
+
+    pub fn draw(&mut self, params: &Value) -> Result<Value, String> {
+        let window_id = params.get("window_id").and_then(|v| v.as_i64());
+        let raw = params
+            .get("points")
+            .and_then(|v| v.as_array())
+            .ok_or("draw needs a points array")?;
+        if raw.len() > 4096 {
+            return Err("at most 4096 points per stroke".into());
+        }
+        let mut points = Vec::new();
+        for item in raw {
+            let pair = item.as_array().ok_or("each point is [x, y]")?;
+            if pair.len() != 2 {
+                return Err("each point must contain exactly x and y".into());
+            }
+            let x = i32::try_from(pair[0].as_i64().ok_or("point x")?)
+                .map_err(|_| "point x out of range")?;
+            let y = i32::try_from(pair[1].as_i64().ok_or("point y")?)
+                .map_err(|_| "point y out of range")?;
+            points.push((x, y));
+        }
+        if points.len() < 2 {
+            return Err("a stroke needs at least two points".into());
+        }
+        let step = match params.get("step") {
+            None => 6,
+            Some(value) => i32::try_from(value.as_i64().ok_or("step must be an integer")?)
+                .map_err(|_| "step out of range")?,
+        };
+        if !(1..=40).contains(&step) {
+            return Err("step must be between 1 and 40".into());
+        }
+        if let Some(id) = window_id {
+            self.guard_input(id)?;
+            let info = describe(id as isize).ok_or_else(|| format!("window {id} is not open"))?;
+            focus(id as isize)?;
+            for point in &mut points {
+                point.0 = point
+                    .0
+                    .checked_add(info.left)
+                    .ok_or("stroke x out of range")?;
+                point.1 = point
+                    .1
+                    .checked_add(info.top)
+                    .ok_or("stroke y out of range")?;
+            }
+        } else {
+            self.guard_point(points[0].0, points[0].1)?;
+        }
+        let dense = densify(&points, step)?;
+        stroke(&dense)?;
+        Ok(json!({"points": dense.len()}))
+    }
+
+    /// Independent straight strokes, with one validated target/idle check.
+    /// Used by image-to-stroke plans; never opens, pastes or loads an image.
+    pub fn draw_strokes(&mut self, params: &Value) -> Result<Value, String> {
+        let id = params
+            .get("window_id")
+            .and_then(|v| v.as_i64())
+            .ok_or("draw_strokes requires window_id")?;
+        let info = describe(id as isize).ok_or("stroke target is not open")?;
+        let width = info.right - info.left;
+        let height = info.bottom - info.top;
+        let raw = params
+            .get("strokes")
+            .and_then(|v| v.as_array())
+            .ok_or("strokes must be an array")?;
+        if raw.is_empty() || raw.len() > 2000 {
+            return Err("provide 1 to 2000 strokes".into());
+        }
+        let mut lines = Vec::with_capacity(raw.len());
+        for value in raw {
+            let values = value.as_array().ok_or("each stroke is [x1,y1,x2,y2]")?;
+            if values.len() != 4 {
+                return Err("each stroke needs four coordinates".into());
+            }
+            let mut p = [0; 4];
+            for (index, value) in values.iter().enumerate() {
+                p[index] = i32::try_from(
+                    value
+                        .as_i64()
+                        .ok_or("stroke coordinate must be an integer")?,
+                )
+                .map_err(|_| "stroke coordinate out of range")?;
+                let limit = if index % 2 == 0 { width } else { height };
+                if p[index] < 0 || p[index] >= limit {
+                    return Err("stroke leaves the target window".into());
+                }
+                p[index] = p[index]
+                    .checked_add(if index % 2 == 0 { info.left } else { info.top })
+                    .ok_or("stroke coordinate overflow")?;
+            }
+            lines.push([(p[0], p[1]), (p[2], p[3])]);
+        }
+        let hold_ms = params
+            .get("hold_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            .min(500) as u32;
+        let settle_ms = params
+            .get("settle_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(3)
+            .min(1000);
+        // 0 sends only the two end points (fastest, fine for Paint). A positive step walks the
+        // pointer in steps of that many pixels, which apps that sample the cursor late need.
+        let step = params
+            .get("step")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            .clamp(0, 200) as i32;
+        self.guard_input(id)?;
+        focus(id as isize)?;
+        let start = Instant::now();
+        STROKE_HOLD_MS.store(hold_ms, std::sync::atomic::Ordering::Relaxed);
+        let outcome = (|| -> Result<(), String> {
+            for line in &lines {
+                crate::check_running()?;
+                if step > 0 {
+                    stroke(&densify(&line[..], step)?)?;
+                } else {
+                    stroke(line)?;
+                }
+                // Let the target process consume the down/move/up sequence.
+                crate::timing::sleep(Duration::from_millis(settle_ms))?;
+            }
+            Ok(())
+        })();
+        STROKE_HOLD_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+        outcome?;
+        Ok(
+            json!({"strokes":lines.len(),"elapsed_ms":start.elapsed().as_millis(),"hold_ms":hold_ms,"settle_ms":settle_ms,"step":step}),
+        )
+    }
+
+    pub fn scroll(&mut self, params: &Value) -> Result<Value, String> {
+        let (x, y, window_id) = self.resolve_point(params)?;
+        if let Some(id) = window_id {
+            self.guard_input(id)?;
+            focus(id as isize)?;
+        } else {
+            self.guard_point(x, y)?;
+        }
+        let instant = instant_motion(params)?;
+        let vertical = if params.get("scrollY").is_some() || params.get("scroll_y").is_some() {
+            -wheel_ticks(int_key(params, &["scrollY", "scroll_y"]).unwrap_or(0))
+        } else if params
+            .get("horizontal")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            0
+        } else {
+            int_key(params, &["ticks"]).unwrap_or(0)
+        };
+        let horizontal = if params.get("scrollX").is_some() || params.get("scroll_x").is_some() {
+            wheel_ticks(int_key(params, &["scrollX", "scroll_x"]).unwrap_or(0))
+        } else if params
+            .get("horizontal")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            int_key(params, &["ticks"]).unwrap_or(0)
+        } else {
+            0
+        };
+        if vertical == 0 && horizontal == 0 {
+            return Err("provide a non-zero scroll delta".into());
+        }
+        if vertical.unsigned_abs() > 100 || horizontal.unsigned_abs() > 100 {
+            return Err("at most 100 wheel ticks per axis per request".into());
+        }
+        crate::motion::move_pointer(x, y, instant)?;
+        ensure_point_allowed(x, y)?;
+        crate::check_running()?;
+        paced_wheel(vertical, false, instant)?;
+        paced_wheel(horizontal, true, instant)?;
+        note_injection();
+        crate::overlay::signal(x, y, false);
+        Ok(json!({"scrolled": true}))
+    }
+
+    pub fn type_text(&mut self, params: &Value) -> Result<Value, String> {
+        let text = params
+            .get("text")
+            .and_then(|v| v.as_str())
+            .ok_or("missing text")?;
+        if let Some(id) = params.get("window_id").and_then(|v| v.as_i64()) {
+            self.guard_input(id)?;
+            focus(id as isize)?;
+        } else {
+            self.guard_foreground()?;
+        }
+        type_unicode(text)?;
+        note_injection();
+        Ok(json!({"typed": text.chars().count()}))
+    }
+
+    pub fn press_key(&mut self, params: &Value) -> Result<Value, String> {
+        let chord = params
+            .get("key")
+            .or_else(|| params.get("keys"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if let Some(id) = params.get("window_id").and_then(|v| v.as_i64()) {
+            self.guard_input(id)?;
+            focus(id as isize)?;
+        } else {
+            self.guard_foreground()?;
+        }
+        let combo = crate::keys::parse_combo(chord)?;
+        send_combo(&combo)?;
+        note_injection();
+        crate::overlay::touch();
+        Ok(json!({"pressed": chord}))
+    }
+
+    pub fn set_value(&mut self, params: &Value) -> Result<Value, String> {
+        self.guard_cached_target(params)?;
+        let index = int_key(params, &["element_index"])? as usize;
+        let value = params
+            .get("value")
+            .and_then(|v| v.as_str())
+            .ok_or("missing value")?
+            .to_string();
+        let element = self.cached(index)?;
+        let _ = element.set_focus();
+        let pattern: UIValuePattern = element
+            .get_pattern()
+            .map_err(|_| format!("element [{index}] is not editable"))?;
+        pattern.set_value(&value).map_err(|err| err.to_string())?;
+        Ok(json!({"set": index}))
+    }
+
+    pub fn secondary(&mut self, params: &Value) -> Result<Value, String> {
+        self.guard_cached_target(params)?;
+        let index = int_key(params, &["element_index"])? as usize;
+        let action = params
+            .get("action")
+            .or_else(|| params.get("secondary"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let element = self.cached(index)?;
+        let _ = element.set_focus();
+        match canonical(action)?.as_str() {
+            "invoke" => {
+                let pattern: UIInvokePattern =
+                    element.get_pattern().map_err(|err| err.to_string())?;
+                pattern.invoke().map_err(|err| err.to_string())?;
+            }
+            "expand" => {
+                let pattern: UIExpandCollapsePattern =
+                    element.get_pattern().map_err(|err| err.to_string())?;
+                pattern.expand().map_err(|err| err.to_string())?;
+            }
+            "collapse" => {
+                let pattern: UIExpandCollapsePattern =
+                    element.get_pattern().map_err(|err| err.to_string())?;
+                pattern.collapse().map_err(|err| err.to_string())?;
+            }
+            "raise" => {
+                let pattern: UIScrollItemPattern =
+                    element.get_pattern().map_err(|err| err.to_string())?;
+                pattern.scroll_into_view().map_err(|err| err.to_string())?;
+            }
+            "scroll_up" | "scroll_down" | "scroll_left" | "scroll_right" => {
+                let pattern: UIScrollPattern =
+                    element.get_pattern().map_err(|err| err.to_string())?;
+                scroll_pattern(&pattern, action)?;
+            }
+            other => return Err(format!("unknown action {other}")),
+        }
+        Ok(json!({"ran": action, "element": index}))
+    }
+
+    pub fn paste(&mut self, params: &Value) -> Result<Value, String> {
+        let text = params
+            .get("text")
+            .and_then(|v| v.as_str())
+            .ok_or("missing text")?;
+        if let Some(id) = params.get("window_id").and_then(|v| v.as_i64()) {
+            self.guard_input(id)?;
+            focus(id as isize)?;
+        } else {
+            self.guard_foreground()?;
+        }
+        self.clipboard_write(text)?;
+        send_combo(&crate::keys::parse_combo("ctrl+v")?)?;
+        Ok(json!({"pasted": text.chars().count()}))
+    }
+
+    pub fn clipboard_read(&self) -> Result<Value, String> {
+        let text = read_clipboard()?;
+        Ok(json!({"text": text}))
+    }
+
+    pub fn clipboard_write(&self, text: &str) -> Result<Value, String> {
+        crate::guard::prepare()?;
+        crate::guard::begin_action();
+        write_clipboard(text)?;
+        Ok(json!({"wrote": text.chars().count()}))
+    }
+
+    pub fn launch(&self, app: &str) -> Result<Value, String> {
+        let target = if app.trim().is_empty() {
+            return Err("launch_app needs an app id or name".into());
+        } else {
+            app.trim()
+        };
+        ensure_token(target)?;
+        crate::guard::prepare()?;
+        crate::guard::begin_action();
+        let wide: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
+        let open: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+        let code = unsafe {
+            ShellExecuteW(
+                None,
+                PCWSTR(open.as_ptr()),
+                PCWSTR(wide.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        if (code.0 as isize) <= 32 {
+            return Err(format!(
+                "could not launch {target} (ShellExecute {})",
+                code.0 as isize
+            ));
+        }
+        Ok(json!({"launched": target}))
+    }
+
+    pub fn batch(&mut self, actions: Value) -> Result<Value, String> {
+        let list = actions.as_array().ok_or("batch needs an actions array")?;
+        if list.len() > 50 {
+            return Err("at most 50 actions per batch".into());
+        }
+        let mut results = Vec::new();
+        for (index, action) in list.iter().enumerate() {
+            if let Err(error) = crate::check_running() {
+                results.push(json!({"index":index,"ok":false,"error":error}));
+                break;
+            }
+            let name = action.get("action").and_then(|v| v.as_str()).unwrap_or("");
+            let outcome = match name {
+                "click" | "double_click" | "right_click" => {
+                    let mut owned = action.clone();
+                    if name == "double_click" {
+                        owned["count"] = json!(2);
+                    }
+                    if name == "right_click" {
+                        owned["button"] = json!("right");
+                    }
+                    self.click(&owned)
+                }
+                "move" => self.move_to(action),
+                "drag" => self.drag(action),
+                "draw" => self.draw(action),
+                "scroll" => self.scroll(action),
+                "type" | "type_text" => self.type_text(action),
+                "key" | "press_key" => self.press_key(action),
+                "set_value" => self.set_value(action),
+                "secondary" => self.secondary(action),
+                "paste" => self.paste(action),
+                "focus_window" => {
+                    let title = action.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                    let windows = self.list_windows(title)?;
+                    let id = windows
+                        .as_array()
+                        .and_then(|rows| rows.first())
+                        .and_then(|row| row.get("id"))
+                        .and_then(|v| v.as_i64());
+                    match id {
+                        Some(id) => self.activate(id),
+                        None => Err(format!("no visible window matches {title:?}")),
+                    }
+                }
+                "wait" => {
+                    crate::guard::begin_action();
+                    let seconds = action
+                        .get("seconds")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.5)
+                        .clamp(0.0, 10.0);
+                    crate::cancellable_wait(Duration::from_secs_f64(seconds))
+                        .map(|()| json!({"waited": seconds}))
+                }
+                other => Err(format!("unknown action {other:?}")),
+            };
+            match outcome {
+                Ok(value) => results.push(json!({"index": index, "ok": true, "result": value})),
+                Err(err) => {
+                    results.push(json!({"index": index, "ok": false, "error": err}));
+                    break;
+                }
+            }
+        }
+        Ok(Value::Array(results))
+    }
+
+    fn snapshot(&mut self, hwnd: isize) -> Result<String, String> {
+        let handle = uiautomation::types::Handle::from(HWND(hwnd as *mut std::ffi::c_void));
+        let element = self
+            .automation
+            .element_from_handle(handle)
+            .map_err(|err| err.to_string())?;
+        self.nodes.clear();
+        self.cache_hwnd = hwnd;
+        walk(&self.walker, &element, 0, &mut self.nodes)?;
+        let mut lines: Vec<&str> = self.nodes.iter().map(|node| node.line.as_str()).collect();
+        if self.nodes.len() >= MAX_NODES {
+            lines.push("(truncated at 400 elements)");
+        }
+        Ok(lines.join("\n"))
+    }
+
+    fn guard_cached_target(&self, params: &Value) -> Result<(), String> {
+        if let Some(id) = params.get("window_id").and_then(|v| v.as_i64()) {
+            if id != self.cache_hwnd as i64 {
+                return Err(
+                    "element belongs to another window; call get_window_state again".into(),
+                );
+            }
+        }
+        self.guard_input(self.cache_hwnd as i64)
+    }
+
+    fn cached(&self, index: usize) -> Result<&UIElement, String> {
+        self.nodes.get(index).map(|node| &node.element).ok_or_else(|| {
+            "element_index is not in the latest accessibility snapshot; call get_window_state again".into()
+        })
+    }
+
+    fn resolve_point(&self, params: &Value) -> Result<(i32, i32, Option<i64>), String> {
+        if let Some(index) = params.get("element_index").and_then(|v| v.as_i64()) {
+            if index >= 0 {
+                self.guard_cached_target(params)?;
+                let element = self.cached(index as usize)?;
+                let rect = element
+                    .get_bounding_rectangle()
+                    .map_err(|err| err.to_string())?;
+                let x = (rect.get_left() + rect.get_right()) / 2;
+                let y = (rect.get_top() + rect.get_bottom()) / 2;
+                return Ok((x, y, Some(self.cache_hwnd as i64)));
+            }
+        }
+        let x = int_key(params, &["x"])?;
+        let y = int_key(params, &["y"])?;
+        if let Some(window_id) = params.get("window_id").and_then(|v| v.as_i64()) {
+            if window_id != 0 {
+                let info = describe(window_id as isize)
+                    .ok_or_else(|| format!("window {window_id} is not open"))?;
+                if x < 0 || y < 0 || x >= info.right - info.left || y >= info.bottom - info.top {
+                    return Err("point leaves the target window".into());
+                }
+                return Ok((
+                    info.left.checked_add(x).ok_or("point x out of range")?,
+                    info.top.checked_add(y).ok_or("point y out of range")?,
+                    Some(window_id),
+                ));
+            }
+        }
+        Ok((x, y, None))
+    }
+
+    fn guard_input(&self, window_id: i64) -> Result<(), String> {
+        crate::guard::prepare()?;
+        self.ensure_allowed(window_id)?;
+        crate::guard::begin_action();
+        Ok(())
+    }
+    fn guard_point(&self, x: i32, y: i32) -> Result<(), String> {
+        crate::guard::prepare()?;
+        if allow_list_on() {
+            ensure_token(&process_image_of(window_at(x, y)))?;
+        }
+        crate::guard::begin_action();
+        Ok(())
+    }
+    fn guard_foreground(&self) -> Result<(), String> {
+        crate::guard::prepare()?;
+        if allow_list_on() {
+            let hwnd = unsafe { GetForegroundWindow() };
+            ensure_token(&process_image_of(hwnd.0 as isize))?;
+        }
+        crate::guard::begin_action();
+        Ok(())
+    }
+
+    fn ensure_allowed(&self, window_id: i64) -> Result<(), String> {
+        if !allow_list_on() {
+            return Ok(());
+        }
+        let info = describe(window_id as isize)
+            .ok_or_else(|| format!("window {window_id} is not open"))?;
+        ensure_token(&info.app)
+    }
+}
+
+struct WindowInfo {
+    hwnd: isize,
+    title: String,
+    pid: u32,
+    app: String,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+impl WindowInfo {
+    fn to_json(&self) -> Value {
+        json!({
+            "id": self.hwnd as i64,
+            "title": self.title,
+            "pid": self.pid,
+            "app": self.app,
+            "rect": [self.left, self.top, self.right, self.bottom],
+        })
+    }
+}
+
+fn describe(hwnd: isize) -> Option<WindowInfo> {
+    let handle = HWND(hwnd as *mut std::ffi::c_void);
+    unsafe {
+        if !IsWindowVisible(handle).as_bool() && hwnd == 0 {
+            return None;
+        }
+        let length = GetWindowTextLengthW(handle);
+        let mut buffer = vec![0u16; (length.max(0) as usize) + 1];
+        let _ = GetWindowTextW(handle, &mut buffer);
+        let title = u16_string(&buffer);
+        let mut rect = windows::Win32::Foundation::RECT::default();
+        let _ = GetWindowRect(handle, &mut rect);
+        let mut pid = 0u32;
+        let _ = GetWindowThreadProcessId(handle, Some(&mut pid));
+        if title.is_empty() && pid == 0 {
+            return None;
+        }
+        Some(WindowInfo {
+            hwnd,
+            title,
+            pid,
+            app: process_image(pid),
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+        })
+    }
+}
+
+fn top_level_windows() -> Vec<isize> {
+    let mut found = Vec::new();
+    unsafe {
+        let _ = EnumWindows(
+            Some(enum_window),
+            LPARAM(&mut found as *mut Vec<isize> as isize),
+        );
+    }
+    found
+}
+
+unsafe extern "system" fn enum_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    if !IsWindowVisible(hwnd).as_bool() {
+        return BOOL(1);
+    }
+    if GetWindowTextLengthW(hwnd) == 0 {
+        return BOOL(1);
+    }
+    let list = &mut *(lparam.0 as *mut Vec<isize>);
+    list.push(hwnd.0 as isize);
+    BOOL(1)
+}
+
+fn process_image(pid: u32) -> String {
+    if pid == 0 {
+        return String::new();
+    }
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return String::new();
+        };
+        let mut buffer = vec![0u16; 32768];
+        let mut size = buffer.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buffer.as_mut_ptr()),
+            &mut size,
+        );
+        let _ = CloseHandle(handle);
+        if ok.is_err() {
+            return String::new();
+        }
+        u16_string(&buffer[..size as usize])
+    }
+}
+
+fn process_image_of(hwnd: isize) -> String {
+    describe(hwnd).map(|info| info.app).unwrap_or_default()
+}
+
+fn window_at(x: i32, y: i32) -> isize {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_ROOT};
+    unsafe {
+        let hwnd = WindowFromPoint(POINT { x, y });
+        let root = GetAncestor(hwnd, GA_ROOT);
+        if root.0.is_null() {
+            hwnd.0 as isize
+        } else {
+            root.0 as isize
+        }
+    }
+}
+
+fn focus(hwnd: isize) -> Result<(), String> {
+    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        AllowSetForegroundWindow, BringWindowToTop, GetAncestor, ASFW_ANY, GA_ROOTOWNER,
+    };
+    let handle = HWND(hwnd as *mut std::ffi::c_void);
+    unsafe {
+        let active = GetForegroundWindow();
+        // Preserve keyboard focus inside the target and its owned dialogs.
+        // Re-activating the main window can steal focus from a modal edit field.
+        if active == handle || (!active.0.is_null() && GetAncestor(active, GA_ROOTOWNER) == handle)
+        {
+            return Ok(());
+        }
+        if IsIconic(handle).as_bool() {
+            let _ = ShowWindow(handle, SW_RESTORE);
+        }
+        // A fresh process is not the foreground, so Windows refuses the first
+        // SetForegroundWindow. Joining the foreground thread's input queue is
+        // the documented way through that lock.
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+        if SetForegroundWindow(handle).as_bool() {
+            return Ok(());
+        }
+        let foreground = GetForegroundWindow();
+        let foreground_thread = GetWindowThreadProcessId(foreground, None);
+        let target_thread = GetWindowThreadProcessId(handle, None);
+        let current = GetCurrentThreadId();
+        let attached_foreground = !foreground.0.is_null()
+            && AttachThreadInput(current, foreground_thread, true).as_bool();
+        let attached_target = AttachThreadInput(current, target_thread, true).as_bool();
+        let _ = BringWindowToTop(handle);
+        let ok = SetForegroundWindow(handle).as_bool();
+        if attached_target {
+            let _ = AttachThreadInput(current, target_thread, false);
+        }
+        if attached_foreground {
+            let _ = AttachThreadInput(current, foreground_thread, false);
+        }
+        if ok {
+            return Ok(());
+        }
+    }
+    Err(format!("could not focus window {hwnd}"))
+}
+
+// Injection pacing never updates the physical-input activity clock.
+fn note_injection() {}
+
+fn allow_list_on() -> bool {
+    std::env::var("POINTHAND_ALLOW")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn ensure_token(image: &str) -> Result<(), String> {
+    let raw = std::env::var("POINTHAND_ALLOW").unwrap_or_default();
+    if app_allowed(image, &raw) {
+        Ok(())
+    } else {
+        Err(format!("{image} is outside POINTHAND_ALLOW ({raw})"))
+    }
+}
+
+fn app_allowed(image: &str, allow_csv: &str) -> bool {
+    let allowed = allow_tokens(allow_csv);
+    if allowed.is_empty() {
+        return true;
+    }
+    let text = image.trim().to_ascii_lowercase().replace('/', "\\");
+    let base = std::path::Path::new(&text)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_string();
+    let stem = std::path::Path::new(&base)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_string();
+    allowed.contains(&text) || allowed.contains(&base) || allowed.contains(&stem)
+}
+
+fn allow_tokens(allow_csv: &str) -> std::collections::HashSet<String> {
+    let mut tokens = std::collections::HashSet::new();
+    for part in allow_csv.split(',') {
+        let item = part.trim().to_ascii_lowercase().replace('/', "\\");
+        if item.is_empty() {
+            continue;
+        }
+        let base = std::path::Path::new(&item)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("")
+            .to_string();
+        let stem = std::path::Path::new(&base)
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("")
+            .to_string();
+        if item.contains('\\') {
+            tokens.insert(item);
+        } else {
+            tokens.insert(item);
+            tokens.insert(base);
+            tokens.insert(stem);
+        }
+    }
+    tokens
+}
+
+fn u16_string(buffer: &[u16]) -> String {
+    let end = buffer
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(buffer.len());
+    String::from_utf16_lossy(&buffer[..end])
+}
+
+fn int_key(params: &Value, keys: &[&str]) -> Result<i32, String> {
+    for key in keys {
+        if let Some(value) = params.get(*key).and_then(|value| value.as_i64()) {
+            return i32::try_from(value)
+                .map_err(|_| format!("{key} is outside the signed 32-bit coordinate range"));
+        }
+    }
+    Err(format!("missing or invalid {}", keys.join(" or ")))
+}
+
+const MAX_STROKE_SAMPLES: usize = 10_000;
+fn densify(points: &[(i32, i32)], step: i32) -> Result<Vec<(i32, i32)>, String> {
+    if step < 1 {
+        return Err("stroke step must be positive".into());
+    }
+    let mut dense = Vec::new();
+    if let Some(first) = points.first() {
+        dense.push(*first);
+    }
+    for pair in points.windows(2) {
+        let (x, y) = (i64::from(pair[0].0), i64::from(pair[0].1));
+        let dx = i64::from(pair[1].0) - x;
+        let dy = i64::from(pair[1].1) - y;
+        let distance = dx.abs().max(dy.abs());
+        let segments = ((distance + i64::from(step) - 1) / i64::from(step)).max(1);
+        if segments > (MAX_STROKE_SAMPLES - dense.len()) as i64 {
+            return Err("stroke exceeds 10000 samples; split it into smaller strokes".into());
+        }
+        for i in 1..=segments {
+            dense.push((
+                (x + dx * i / segments) as i32,
+                (y + dy * i / segments) as i32,
+            ));
+        }
+    }
+    Ok(dense)
+}
+
+fn virtual_screen() -> (i32, i32, i32, i32) {
+    unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        )
+    }
+}
+
+fn to_absolute(x: i32, y: i32) -> (i32, i32) {
+    let (origin_x, origin_y, width, height) = virtual_screen();
+    let width = (width.max(2) - 1) as i64;
+    let height = (height.max(2) - 1) as i64;
+    let nx = (((x as i64 - origin_x as i64) * 65535) / width).clamp(0, 65535) as i32;
+    let ny = (((y as i64 - origin_y as i64) * 65535) / height).clamp(0, 65535) as i32;
+    (nx, ny)
+}
+
+/// Extra time (ms) a stroke waits after pressing and before releasing the button.
+/// Apps such as Illustrator read the cursor when they process an event, not when it
+/// was sent, so a stroke needs a pause or its end point drifts. 0 keeps the fast path.
+static STROKE_HOLD_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn stroke_hold() -> Result<(), String> {
+    let ms = STROKE_HOLD_MS.load(std::sync::atomic::Ordering::Relaxed);
+    if ms > 0 {
+        crate::timing::sleep(Duration::from_millis(ms as u64))?;
+    }
+    Ok(())
+}
+
+fn stroke(points: &[(i32, i32)]) -> Result<(), String> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+        MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
+    };
+    let place = MOUSEEVENTF_MOVE
+        | MOUSEEVENTF_ABSOLUTE
+        | MOUSEEVENTF_VIRTUALDESK
+        | windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_MOVE_NOCOALESCE;
+    let packet = |events: &[(
+        windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS,
+        i32,
+        i32,
+    )]|
+     -> Result<(), String> {
+        let inputs: Vec<INPUT> = events
+            .iter()
+            .map(|(flags, x, y)| INPUT {
+                r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_MOUSE,
+                Anonymous: INPUT_0 {
+                    mi: MOUSEINPUT {
+                        dx: *x,
+                        dy: *y,
+                        mouseData: 0,
+                        dwFlags: *flags,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            })
+            .collect();
+        let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+        note_injection();
+        if sent != inputs.len() as u32 {
+            return Err("mouse input was blocked".into());
+        }
+        Ok(())
+    };
+    // Button-down has to travel in the same packet as the first absolute
+    // move. A separate relative LEFTDOWN lands at the previous cursor and
+    // Paint records a stray line into the stroke.
+    crate::overlay::signal(points[0].0, points[0].1, true);
+    let (x, y) = to_absolute(points[0].0, points[0].1);
+    crate::check_running()?;
+    let outcome = (|| {
+        packet(&[(place, x, y), (place | MOUSEEVENTF_LEFTDOWN, x, y)])?;
+        stroke_hold()?;
+        let mut overlay_tick = Instant::now();
+        for (px, py) in points.iter().skip(1) {
+            crate::check_running()?;
+            if overlay_tick.elapsed() >= Duration::from_millis(8) {
+                crate::overlay::signal(*px, *py, false);
+                overlay_tick = Instant::now();
+            }
+            let (ax, ay) = to_absolute(*px, *py);
+            packet(&[(place, ax, ay)])?;
+            crate::timing::sleep(Duration::from_millis(4))?;
+        }
+        stroke_hold()?;
+        Ok(())
+    })();
+    // Always release, including partial SendInput, cancellation and mid-stroke errors.
+    let release = packet(&[(MOUSEEVENTF_LEFTUP, 0, 0)]);
+    if let Some((x, y)) = points.last() {
+        crate::overlay::signal(*x, *y, false);
+    }
+    outcome.and(release)
+}
+
+fn wheel_ticks(delta_px: i32) -> i32 {
+    if delta_px == 0 {
+        return 0;
+    }
+    let ticks = (delta_px as f32 / 120.0).round() as i32;
+    if ticks == 0 {
+        delta_px.signum()
+    } else {
+        ticks
+    }
+}
+
+fn wheel(ticks: i32, horizontal: bool) -> Result<(), String> {
+    if ticks == 0 {
+        return Ok(());
+    }
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_WHEEL, MOUSEINPUT,
+    };
+    let flags = if horizontal {
+        MOUSEEVENTF_HWHEEL
+    } else {
+        MOUSEEVENTF_WHEEL
+    };
+    let input = INPUT {
+        r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: ticks.checked_mul(120).ok_or("scroll delta out of range")? as u32,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+    if sent != 1 {
+        return Err("scroll input was blocked".into());
+    }
+    Ok(())
+}
+
+fn type_unicode(text: &str) -> Result<(), String> {
+    for unit in text.encode_utf16() {
+        crate::check_running()?;
+        crate::overlay::touch();
+        if unit == u16::from(b'\n') {
+            tap_vk(0x0D)?;
+            continue;
+        }
+        if unit == u16::from(b'\r') {
+            continue;
+        }
+        send_unicode_unit(unit)?;
+    }
+    Ok(())
+}
+
+// Testable input transaction: every attempted key-down gets a best-effort
+// release even if a later key is blocked or Escape interrupts the chord.
+fn key_transaction(
+    codes: &[u16],
+    mut send: impl FnMut(u16, bool) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut held = Vec::new();
+    let outcome = (|| {
+        for code in codes {
+            held.push(*code);
+            send(*code, false)?;
+        }
+        Ok(())
+    })();
+    let mut release_error = None;
+    for code in held.into_iter().rev() {
+        if let Err(error) = send(code, true) {
+            if release_error.is_none() {
+                release_error = Some(error);
+            }
+        }
+    }
+    outcome.and(match release_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    })
+}
+fn send_combo(combo: &crate::keys::Combo) -> Result<(), String> {
+    crate::check_running()?;
+    crate::overlay::touch();
+    let mut codes = combo.modifiers.clone();
+    codes.push(combo.key);
+    key_transaction(&codes, |code, up| {
+        key_event(code, up)?;
+        if !up {
+            crate::timing::sleep(Duration::from_millis(35))?;
+        }
+        Ok(())
+    })
+}
+fn tap_vk(code: u16) -> Result<(), String> {
+    crate::check_running()?;
+    key_transaction(&[code], key_event)
+}
+
+fn key_event(code: u16, up: bool) -> Result<(), String> {
+    if !up {
+        crate::check_running()?;
+    }
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+    };
+    let mut flags = windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(0);
+    if matches!(code, 0x21..=0x28 | 0x2C..=0x2E | 0x5B..=0x5C | 0x6F | 0x90) {
+        flags |= windows::Win32::UI::Input::KeyboardAndMouse::KEYEVENTF_EXTENDEDKEY;
+    }
+    if up {
+        flags |= KEYEVENTF_KEYUP;
+    }
+    let input = INPUT {
+        r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(code),
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+    if sent != 1 {
+        return Err("key input was blocked".into());
+    }
+    Ok(())
+}
+
+fn send_unicode_unit(unit: u16) -> Result<(), String> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY,
+    };
+    let down = INPUT {
+        r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(0),
+                wScan: unit,
+                dwFlags: KEYEVENTF_UNICODE,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let up = INPUT {
+        r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(0),
+                wScan: unit,
+                dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let sent = unsafe { SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32) };
+    if sent != 2 {
+        let _ = unsafe { SendInput(&[up], std::mem::size_of::<INPUT>() as i32) };
+        return Err("text input was blocked".into());
+    }
+    Ok(())
+}
+
+fn canonical(action: &str) -> Result<String, String> {
+    let key = action
+        .replace('_', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    let mapped = match key.as_str() {
+        "invoke" => "invoke",
+        "expand" => "expand",
+        "collapse" => "collapse",
+        "raise" => "raise",
+        "scroll up" => "scroll_up",
+        "scroll down" => "scroll_down",
+        "scroll left" => "scroll_left",
+        "scroll right" => "scroll_right",
+        _ => return Err(format!("unknown secondary action {action:?}")),
+    };
+    Ok(mapped.into())
+}
+
+fn scroll_pattern(pattern: &UIScrollPattern, action: &str) -> Result<(), String> {
+    use uiautomation::types::ScrollAmount::{NoAmount, SmallDecrement, SmallIncrement};
+    let kind = canonical(action)?;
+    let (horizontal, vertical) = match kind.as_str() {
+        "scroll_up" => (NoAmount, SmallDecrement),
+        "scroll_down" => (NoAmount, SmallIncrement),
+        "scroll_left" => (SmallDecrement, NoAmount),
+        "scroll_right" => (SmallIncrement, NoAmount),
+        _ => return Err(format!("not a scroll action: {action}")),
+    };
+    pattern
+        .scroll(horizontal, vertical)
+        .map_err(|err| err.to_string())
+}
+
+fn walk(
+    walker: &UITreeWalker,
+    element: &UIElement,
+    depth: usize,
+    nodes: &mut Vec<CachedNode>,
+) -> Result<(), String> {
+    if nodes.len() >= MAX_NODES || depth > MAX_DEPTH {
+        return Ok(());
+    }
+    let index = nodes.len();
+    let line = format_node(element, index, depth);
+    nodes.push(CachedNode {
+        element: element.clone(),
+        line,
+    });
+    let mut child = walker.get_first_child(element).ok();
+    let mut children = 0;
+    while let Some(current) = child {
+        if nodes.len() >= MAX_NODES || children >= MAX_CHILDREN {
+            nodes[index].line.push_str(" children_truncated");
+            break;
+        }
+        walk(walker, &current, depth + 1, nodes)?;
+        children += 1;
+        child = walker.get_next_sibling(&current).ok();
+    }
+    Ok(())
+}
+
+fn format_node(element: &UIElement, index: usize, depth: usize) -> String {
+    let role = element
+        .get_control_type()
+        .map(|kind| format!("{kind:?}"))
+        .unwrap_or_else(|_| "Unknown".into());
+    let name = element
+        .get_name()
+        .unwrap_or_default()
+        .replace(['\n', '"'], " ");
+    let mut bits = vec![format!("[{index}]"), role];
+    if !name.is_empty() {
+        bits.push(format!("\"{name}\""));
+    }
+    if let Ok(pattern) = element.get_pattern::<UIValuePattern>() {
+        if let Ok(value) = pattern.get_value() {
+            if !value.is_empty() {
+                let shown = value.chars().take(120).collect::<String>();
+                bits.push(format!("value={shown:?}"));
+            }
+        }
+        bits.push("editable".into());
+    }
+    if element.has_keyboard_focus().unwrap_or(false) {
+        bits.push("focused".into());
+    }
+    if element.is_offscreen().unwrap_or(false) {
+        bits.push("offscreen".into());
+    }
+    if !element.is_enabled().unwrap_or(true) {
+        bits.push("disabled".into());
+    }
+    format!("{:indent$}{}", "", bits.join(" "), indent = depth * 2)
+}
+
+fn capture_png(rect: Rect, scale: f32) -> Result<(String, f32, u32, u32), String> {
+    crate::guard::desktop_available()?;
+    let scale = scale.clamp(0.05, 1.0);
+    let shot = Screenshot::capture_rect(rect)
+        .map_err(|err| err.to_string())?
+        .to_rgba();
+    let width = shot.width();
+    let height = shot.height();
+    let longest = width.max(height).max(1);
+    let effective = scale.min(1568.0 / longest as f32);
+    let (pixels, out_w, out_h) = if effective < 0.999 {
+        downsample(shot.pixels(), width, height, effective)
+    } else {
+        (shot.pixels().to_vec(), width, height)
+    };
+    let mut bytes = Vec::new();
+    let mut encoder = png::Encoder::new(&mut bytes, out_w, out_h);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().map_err(|err| err.to_string())?;
+    writer
+        .write_image_data(&pixels)
+        .map_err(|err| err.to_string())?;
+    drop(writer);
+    Ok((
+        base64::engine::general_purpose::STANDARD.encode(bytes),
+        effective,
+        out_w,
+        out_h,
+    ))
+}
+
+fn downsample(src: &[u8], width: u32, height: u32, scale: f32) -> (Vec<u8>, u32, u32) {
+    let out_w = ((width as f32) * scale).round().max(1.0) as u32;
+    let out_h = ((height as f32) * scale).round().max(1.0) as u32;
+    let mut out = vec![0u8; (out_w * out_h * 4) as usize];
+    for y in 0..out_h {
+        let sy = ((y as f32) / scale).min(height.saturating_sub(1) as f32) as u32;
+        for x in 0..out_w {
+            let sx = ((x as f32) / scale).min(width.saturating_sub(1) as f32) as u32;
+            let from = ((sy * width + sx) * 4) as usize;
+            let to = ((y * out_w + x) * 4) as usize;
+            if from + 4 <= src.len() && to + 4 <= out.len() {
+                out[to..to + 4].copy_from_slice(&src[from..from + 4]);
+            }
+        }
+    }
+    (out, out_w, out_h)
+}
+
+fn read_clipboard() -> Result<String, String> {
+    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+    use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+    unsafe {
+        OpenClipboard(None).map_err(|err| err.to_string())?;
+        let handle = GetClipboardData(13u32).map_err(|err| {
+            let _ = CloseClipboard();
+            err.to_string()
+        })?;
+        if handle.0.is_null() {
+            let _ = CloseClipboard();
+            return Ok(String::new());
+        }
+        let memory = windows::Win32::Foundation::HGLOBAL(handle.0);
+        let locked = GlobalLock(memory);
+        if locked.is_null() {
+            let _ = CloseClipboard();
+            return Err("could not read the clipboard".into());
+        }
+        let mut length = 0usize;
+        while length < 1_048_576 && *(locked as *const u16).add(length) != 0 {
+            length += 1;
+        }
+        let text =
+            String::from_utf16_lossy(std::slice::from_raw_parts(locked as *const u16, length));
+        let _ = GlobalUnlock(memory);
+        let _ = CloseClipboard();
+        Ok(text.trim_end_matches('\u{0}').to_string())
+    }
+}
+
+fn write_clipboard(text: &str) -> Result<(), String> {
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let bytes = wide.len() * 2;
+    unsafe {
+        let handle = GlobalAlloc(GMEM_MOVEABLE, bytes).map_err(|err| err.to_string())?;
+        let locked = GlobalLock(handle);
+        if locked.is_null() {
+            return Err("could not lock clipboard memory".into());
+        }
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), locked as *mut u16, wide.len());
+        let _ = GlobalUnlock(handle);
+        OpenClipboard(None).map_err(|err| err.to_string())?;
+        let _ = EmptyClipboard();
+        if SetClipboardData(13u32, Some(as_handle(handle))).is_err() {
+            let _ = CloseClipboard();
+            return Err("could not set clipboard text".into());
+        }
+        let _ = CloseClipboard();
+    }
+    Ok(())
+}
+
+/// SetClipboardData wants a HANDLE. GlobalAlloc returns HGLOBAL, which is that handle.
+fn as_handle(handle: windows::Win32::Foundation::HGLOBAL) -> windows::Win32::Foundation::HANDLE {
+    windows::Win32::Foundation::HANDLE(handle.0)
+}
+
+fn start_menu(query: &str) -> Vec<Value> {
+    let needle = query.to_ascii_lowercase();
+    let mut found = Vec::new();
+    let mut roots = Vec::new();
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        roots.push(PathBuf::from(appdata).join("Microsoft\\Windows\\Start Menu\\Programs"));
+    }
+    if let Ok(programdata) = std::env::var("ProgramData") {
+        roots.push(PathBuf::from(programdata).join("Microsoft\\Windows\\Start Menu\\Programs"));
+    }
+    for root in roots {
+        let _ = visit_shortcuts(&root, &needle, &mut found);
+        if found.len() >= 200 {
+            break;
+        }
+    }
+    found
+}
+
+fn visit_shortcuts(dir: &PathBuf, needle: &str, found: &mut Vec<Value>) -> std::io::Result<()> {
+    if found.len() >= 200 || !dir.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            visit_shortcuts(&path, needle, found)?;
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.to_ascii_lowercase().ends_with(".lnk") {
+            continue;
+        }
+        let display = name.trim_end_matches(".lnk").trim_end_matches(".LNK");
+        let full = path.display().to_string();
+        if !needle.is_empty()
+            && !display.to_ascii_lowercase().contains(needle)
+            && !full.to_ascii_lowercase().contains(needle)
+        {
+            continue;
+        }
+        found.push(json!({
+            "id": full,
+            "displayName": display,
+            "isRunning": false,
+            "windows": [],
+        }));
+        if found.len() >= 200 {
+            break;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::app_allowed;
+
+    #[test]
+    fn densify_keeps_endpoints_and_step() {
+        let dense = super::densify(&[(0, 0), (20, 0)], 6).unwrap();
+        assert_eq!(dense.first(), Some(&(0, 0)));
+        assert_eq!(dense.last(), Some(&(20, 0)));
+        assert!(dense
+            .windows(2)
+            .all(|pair| (pair[1].0 - pair[0].0).abs() <= 6));
+    }
+
+    #[test]
+    fn allow_list_matches_path_name_or_stem() {
+        assert!(app_allowed(r"C:\Windows\notepad.exe", ""));
+        let allow = r"C:\Windows\System32\notepad.exe, calc, notepad.exe";
+        assert!(app_allowed(r"C:\Windows\System32\notepad.exe", allow));
+        assert!(app_allowed("notepad.exe", allow));
+        assert!(app_allowed("NOTEPAD", allow));
+        assert!(app_allowed("calc.exe", allow));
+        assert!(!app_allowed(r"C:\Windows\explorer.exe", allow));
+    }
+}
+
+#[cfg(test)]
+mod input_transaction_tests {
+    use super::*;
+    #[test]
+    fn releases_every_key_after_partial_failure() {
+        let mut events = Vec::new();
+        let result = key_transaction(&[0x11, 0x10, 0x41], |code, up| {
+            events.push((code, up));
+            if code == 0x41 && !up {
+                Err("blocked".into())
+            } else {
+                Ok(())
+            }
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            events,
+            [
+                (0x11, false),
+                (0x10, false),
+                (0x41, false),
+                (0x41, true),
+                (0x10, true),
+                (0x11, true)
+            ]
+        );
+    }
+    #[test]
+    fn attempts_remaining_releases_when_one_release_fails() {
+        let mut events = Vec::new();
+        let result = key_transaction(&[0x11, 0x41], |code, up| {
+            events.push((code, up));
+            if code == 0x41 && up {
+                Err("blocked".into())
+            } else {
+                Ok(())
+            }
+        });
+        assert!(result.is_err());
+        assert_eq!(events.last(), Some(&(0x11, true)));
+    }
+    #[test]
+    fn huge_paths_are_rejected_without_overflow() {
+        assert!(densify(&[(i32::MIN, i32::MIN), (i32::MAX, i32::MAX)], 1).is_err());
+        assert!(densify(&[(0, 0), (1, 1)], 0).is_err());
+    }
+    #[test]
+    fn coordinates_do_not_wrap() {
+        assert!(int_key(&json!({"x":i64::MAX}), &["x"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod release_security_tests {
+    use super::*;
+    #[test]
+    fn explicit_allow_paths_do_not_whitelist_namesakes() {
+        let allow = r"C:\Windows\System32\notepad.exe";
+        assert!(app_allowed(r"C:\Windows\System32\notepad.exe", allow));
+        assert!(!app_allowed(r"C:\Unapproved\notepad.exe", allow));
+        assert!(!app_allowed("notepad.exe", allow));
+        assert!(app_allowed(r"C:\Unapproved\notepad.exe", "notepad"));
+    }
+}
+
+fn instant_motion(params: &Value) -> Result<bool, String> {
+    match params.get("motion").and_then(Value::as_str) {
+        None | Some("natural") => Ok(false),
+        Some("instant") => Ok(true),
+        _ => Err("motion must be natural or instant".into()),
+    }
+}
+
+pub fn system_info() -> Result<Value, String> {
+    unsafe {
+        Ok(json!({"platform":"windows", "arch":std::env::consts::ARCH,
+        "coordinate_space":"physical_pixels", "virtual_screen":{
+            "left":GetSystemMetrics(SM_XVIRTUALSCREEN),
+            "top":GetSystemMetrics(SM_YVIRTUALSCREEN),
+            "width":GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            "height":GetSystemMetrics(SM_CYVIRTUALSCREEN)
+        }}))
+    }
+}
+
+// Re-check the actual receiving window after pointer travel: another app may
+// have appeared above the intended target during the movement.
+fn ensure_point_allowed(x: i32, y: i32) -> Result<(), String> {
+    if allow_list_on() {
+        ensure_token(&process_image_of(window_at(x, y)))?;
+    }
+    Ok(())
+}
+
+fn paced_wheel(ticks: i32, horizontal: bool, instant: bool) -> Result<(), String> {
+    if instant {
+        return wheel(ticks, horizontal);
+    }
+    let count = ticks.unsigned_abs();
+    for index in 0..count {
+        crate::check_running()?;
+        wheel(ticks.signum(), horizontal)?;
+        if index + 1 < count {
+            let phase = (f64::from(index) + 0.5) / f64::from(count);
+            let edge = (phase * 2.0 - 1.0).abs();
+            crate::timing::sleep(Duration::from_secs_f64(
+                (28.0 + 32.0 * edge * edge) / 1000.0,
+            ))?;
+        }
+    }
+    Ok(())
+}

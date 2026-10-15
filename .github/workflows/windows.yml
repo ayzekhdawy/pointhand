@@ -1,0 +1,38 @@
+name: Windows validation
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: npm ci
+        working-directory: client
+      - run: npm test
+        working-directory: client
+      - run: cargo fmt --manifest-path host/Cargo.toml --check
+      - run: cargo test --manifest-path host/Cargo.toml
+      - run: cargo clippy --manifest-path host/Cargo.toml -- -D warnings
+      - run: ./scripts/build-windows.ps1
+      - run: node --test scripts/host-regression.mjs
+      - run: python -m pip install -e .[test]
+      - run: python -m pytest -q tests/test_image_stroke_plan.py
+      - run: ./scripts/package-windows.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pointhand-windows-x64
+          path: |
+            artifacts/*.zip
+            artifacts/*.sha256
