@@ -1,33 +1,67 @@
 <p align="center">
-  <img src="assets/logo.png" alt="pointhand" width="420">
+  <img src="assets/logo.png" alt="PointHand" width="440">
 </p>
 
-<p align="center"><b>A Windows computer-use server for AI agents, over MCP.</b></p>
+<h3 align="center">Give your AI a hand on Windows.</h3>
 
-> **Status: alpha (v0.2.0-alpha.1).** The core tools run through a real MCP client:
-> windows, the UI Automation tree, screenshots, input, clipboard, drawing, and `batch`.
-> Verified live against Paint (strokes and shapes land where requested).
-> Native Rust glass frame and cursor are live-tested. Multi-monitor and mixed-DPI
-> verification and broader benchmarks remain on the roadmap.
+<p align="center">
+  See the screen. Work with desktop apps. Draw through real mouse input.<br>
+  A Windows computer-use MCP server for creative and practical workflows.
+</p>
 
-PointHand lets an MCP client see the screen and operate Windows apps: windows,
-screenshots, mouse, keyboard, scrolling, the UI Automation tree, the clipboard,
-and freehand or geometric drawing. The main path is a TypeScript MCP server that
-spawns a Rust executable. The host now owns the native Win32 glass frame,
-activity label, cursor, motion trail and click ripple. The main TypeScript/Rust
-path needs no Python, Pillow, Tk, stamp file or separate overlay process.
-The Python server remains an optional reference implementation.
+<p align="center">
+  <a href="https://github.com/ayzekhdawy/pointhand/actions/workflows/windows.yml"><img src="https://github.com/ayzekhdawy/pointhand/actions/workflows/windows.yml/badge.svg" alt="Windows validation"></a>
+  <a href="https://github.com/ayzekhdawy/pointhand/releases"><img src="https://img.shields.io/github/v/release/ayzekhdawy/pointhand?include_prereleases&label=release&color=6554ef" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22b8cf" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/platform-Windows_10_%2F_11-0078d4" alt="Windows 10 and 11">
+</p>
 
-This is an independent Win32 and UI Automation implementation. It does not ship
-or wrap any vendor computer-use binary.
+<p align="center">
+  <a href="https://github.com/ayzekhdawy/pointhand/releases"><b>Download</b></a> ·
+  <a href="#quick-start"><b>Quick start</b></a> ·
+  <a href="examples/mona-lisa/README.md"><b>Mona Lisa demo</b></a> ·
+  <a href="docs/technical-reference.md"><b>API reference</b></a> ·
+  <a href="https://github.com/ayzekhdawy/pointhand/issues"><b>Feedback</b></a>
+</p>
 
-## Download and quick start
+---
 
-Published by [@ayzekhdawy](https://github.com/ayzekhdawy).
+## From a reference to a canvas
 
-Download the Windows x64 ZIP and SHA-256 file from [Releases](https://github.com/ayzekhdawy/pointhand/releases). This is an alpha release for supervised creative workflows. Mixed-DPI and multiple-monitor validation are still pending.
+PointHand reproduced the Mona Lisa in Microsoft Paint through its own MCP server. The reusable script selects colors and draws mouse strokes into the canvas.
 
-Extract the ZIP, install Node.js 20 or newer, and configure your MCP client:
+<table>
+  <tr>
+    <th align="center">The reference</th>
+    <th align="center">Drawn in Paint</th>
+  </tr>
+  <tr>
+    <td align="center" width="50%"><img src="examples/mona-lisa/reference.png" alt="Mona Lisa reference painting" width="240"></td>
+    <td align="center" width="50%"><img src="examples/mona-lisa/result.png" alt="Mona Lisa recreated in Paint with PointHand mouse strokes" width="240"></td>
+  </tr>
+</table>
+
+<p align="center">
+  <a href="examples/mona-lisa/demo.mp4"><b>Watch the recorded drawing ↗</b></a> &nbsp; · &nbsp;
+  <a href="examples/mona-lisa/README.md">Run it yourself</a> &nbsp; · &nbsp;
+  <a href="examples/mona-lisa/strokes.json">Explore the stroke plan</a>
+</p>
+
+## Built for desktop work
+
+| Observe | Interact | Create |
+| :--- | :--- | :--- |
+| Find apps and windows, capture screenshots and inspect the UI Automation tree. | Move, click, drag, scroll, type, use key chords and work with the clipboard. | Draw freehand paths and geometric shapes with a native cursor and visible activity frame. |
+
+The TypeScript MCP server connects your agent to a native Rust host. Windows input, accessibility and the overlay run in that host. The portable package needs **Node.js 20+**; Rust and Python are only needed for development or optional components.
+
+**Release status:** PointHand is an alpha for supervised workflows. The published **v0.2.0-alpha.1** package has 25 tools. The current source branch adds `emergency_stop`, monitor/DPI diagnostics and further input fixes, bringing it to 26 tools. See the [changelog](CHANGELOG.md) before choosing a build.
+
+## Quick start
+
+1. Download the Windows x64 ZIP and its SHA-256 file from [Releases](https://github.com/ayzekhdawy/pointhand/releases).
+2. Verify the ZIP with `Get-FileHash -Algorithm SHA256`, then extract it.
+3. Install Node.js 20 or newer and add PointHand to your MCP client:
 
 ```json
 {
@@ -35,240 +69,118 @@ Extract the ZIP, install Node.js 20 or newer, and configure your MCP client:
     "pointhand": {
       "command": "node",
       "args": ["C:/Tools/PointHand/client/dist/index.js"],
-      "env": { "POINTHAND_ALLOW": "mspaint.exe,Illustrator.exe" }
+      "env": {
+        "POINTHAND_ALLOW": "mspaint.exe,Illustrator.exe"
+      }
     }
   }
 }
 ```
 
-Replace the example path with the extracted package's `client/dist/index.js`. The portable package includes the Rust host and runtime dependencies; it needs no Rust or Python installation. Verify the ZIP hash with `Get-FileHash -Algorithm SHA256` before use. [Mona Lisa tutorial and demo](examples/mona-lisa/README.md) · [Safety](SECURITY.md) · [Known validation gaps](docs/release-checklist.md).
+Replace the path with the extracted package's `client/dist/index.js`. Set the allow-list to the apps you want the agent to control; leaving it empty allows every app.
 
-## Layout
+Open a blank Paint canvas and try:
 
-| Piece | Role |
-| --- | --- |
-| `client/` | TypeScript MCP server. Speaks JSON-lines to the host and returns PNG tool results as images. |
-| `host/` | `pointhand-computer-use.exe`. Windows, input, screenshots, accessibility, clipboard, idle guard, allow-list, Escape stop, native overlay. |
-| `pointhand/` | Python MCP server. Optional reference implementation with its own Python overlay. |
-| `scripts/` | `build-windows.ps1` (build + manifest), `mcp-smoke.mjs` (talk to the server like a real client). |
+> Use PointHand to inspect the Paint window, select a drawing tool and draw a small fish in the center of the canvas.
 
-One JSON object per line. A request is `{"id","method","params"}`. A response is
-`{"id","ok","result"}` or `{"id","ok":false,"error"}`. The client passes
-`--parent-pid` so the host exits with it. Physical Escape interrupts strokes, typing, idle waits and batch waits. The source
-branch also exposes an out-of-band MCP `emergency_stop` tool.
-Input requests are bounded to 4 MiB; oversized or invalid UTF-8 lines are drained
-and rejected without breaking the next request.
+For the complete portrait workflow, follow the [Mona Lisa tutorial](examples/mona-lisa/README.md), including the reference, ready-made plan and script instructions.
 
-Screenshots are the visible desktop at the window rectangle. Pixels hidden
-behind another window are whatever is in front. `activate_window` brings the
-target forward before a shot.
+## Visible control. A clear way to stop.
 
-## What the agent can call
+- **Native feedback:** a click-through glass frame, activity label, cursor trail and click ripple show PointHand's activity. The overlay targets 60 FPS and is excluded from screenshots by default.
+- **Physical intervention:** moving your mouse interrupts the active action. Physical Escape stops further mutations until the server restarts.
+- **Scoped access:** restrict receiving apps with executable names or exact paths in `POINTHAND_ALLOW`.
+- **Input cleanup:** interrupted strokes release held buttons. The source branch also provides an out-of-band `emergency_stop` tool that stops active and queued mutations until restart.
 
-`list_apps`, `list_windows`, `get_window`, `launch_app`, `activate_window`,
-`get_window_state`, `screenshot`, `click`, `move`, `drag`, `draw`, `draw_shape`,
-`scroll`, `type_text`, `press_key`, `set_value`, `perform_secondary_action`,
-`paste`, `clipboard_read`, `clipboard_write`, `batch`, `overlay_status`,
-`guard_status`, `get_system_info`, `draw_strokes`, `emergency_stop`.
+Use PointHand in a supervised desktop session. App permissions are a guardrail, not a sandbox against malicious local software. Screenshots capture visible pixels; an obscured window is not a background rendering surface, and elevated windows can reject input. Read the [security policy](SECURITY.md) and [input behavior guide](docs/input-behavior.md).
 
-`emergency_stop` is a source-branch addition after Alpha 1: it interrupts active
-input without waiting for the request queue. Restart the MCP server to resume.
-See [unreleased changes](CHANGELOG.md); the existing Alpha 1 ZIP has 25 tools.
+## Tested on the desktop
 
-`draw_shape` traces a line, ellipse, rectangle, polygon, star, heart, spiral, or
-zigzag with the left button held (pick a pen in the app first). `screenshot`
-captures the whole desktop or a `[left, top, right, bottom]` region.
+| Scenario | Current source validation |
+| :--- | :--- |
+| Paint drawing | Live strokes, shapes and Turkish color-dialog controls through PointHand MCP |
+| Extended desktop | 125% primary + 100% virtual secondary, streamed to a phone with Sunshine |
+| Coordinate precision | Exact click and stroke endpoints with the secondary display on either side |
+| Physical interruption | User mouse movement interrupted a held-button drawing; Windows confirmed button release |
+| Emergency stop | Active drawing cancelled, held button released and queued mutation blocked |
+| Portable package | Windows CI checks ZIP extraction, SHA-256, executable manifest and isolated MCP startup |
 
-`get_window_state` can include a PNG and an accessibility tree. Click an
-`element_index` from that tree, or a point. With `window_id`, `x` and `y` are
-window pixels. Divide image pixels by `screenshot.scale`. Positive `scrollY`
-moves the page down.
+Streamed mixed-DPI overlay runs averaged approximately **57–59 FPS** at a 60 FPS target. These are observed renderer timings, not a display-refresh guarantee.
 
-`batch` runs up to 50 actions and stops at the first error. The Rust host
-accepts `click`, `double_click`, `right_click`, `move`, `drag`, `draw`, `scroll`,
-`type`, `key`, `set_value`, `secondary`, `paste`, `focus_window`, and `wait`.
+Secure-desktop switching, display disconnection during input, more physical monitor combinations and a clean non-developer PC remain to verify. See the [full validation checklist](docs/release-checklist.md) and [multi-monitor report](docs/multimonitor-validation.md).
 
-Key names include `Return`, `Control_L+a`, `KP_0`, `page_up`, and `super`.
+## Develop PointHand
 
-## Safety
+The main implementation uses **TypeScript + Rust + Windows APIs**. The optional Python server is a reference implementation.
 
-An agent with a mouse and keyboard can do anything you can. Treat on-screen
-content as untrusted, and do not point it at banking, password managers, or
-anything irreversible without watching it.
+| Directory | Responsibility |
+| :--- | :--- |
+| [`client/`](client/) | MCP tools, request lifecycle and image results |
+| [`host/`](host/) | Native input, UI Automation, screenshots, clipboard, guards and overlay |
+| [`scripts/`](scripts/) | Build, packaging, verification and creative examples |
+| [`pointhand/`](pointhand/) | Optional Python reference server |
 
-Input waits until the keyboard and mouse have been idle for a short moment.
-If that does not happen within about five seconds the call returns `user_active`
-and does nothing. `POINTHAND_ALLOW` is a comma-separated list of paths, exe
-names, or names without an extension (`notepad.exe` also allows `notepad`).
-An empty list allows every app. Escape stops the current turn.
+<details>
+<summary><b>Build from source</b></summary>
 
-Windows blocks synthetic input into elevated windows. PointHand reports that
-as an error.
-
-The Rust host draws PointHand's own click-through, non-activating glass frame
-and cursor. Native layered windows are excluded from screenshots by default;
-if capture exclusion fails, the renderer reports an error and shuts down.
-`POINTHAND_OVERLAY=0` disables it. `POINTHAND_OVERLAY_CAPTURE=1` includes the
-visuals in screenshots for debugging. `overlay_status` reports readiness,
-errors and last render/frame timings. Renderer windows are omitted from app lists.
-Overlay surfaces and GDI resources close with the Rust host.
-
-A failed or cancelled stroke releases the left mouse button; keyboard transactions
-attempt to release every pressed key even if another release fails. Client timeouts
-reject queued calls and signal an out-of-band native stop event, allowing cleanup
-before a one-second forced termination fallback. A configured `POINTHAND_HOST`
-that does not exist now produces an explicit error.
-
-## Requirements
-
-| Needed | Why | How to get it |
-| --- | --- | --- |
-| Windows 10 or 11 | Win32 and UI Automation | - |
-| Node.js 20+ | Runs the MCP server | `winget install OpenJS.NodeJS.LTS` |
-| Rust (stable) | Builds the host | [rustup.rs](https://rustup.rs) |
-| Visual Studio Build Tools, "Desktop development with C++" | Rust's MSVC linker on Windows | `winget install Microsoft.VisualStudio.2022.BuildTools` |
-| Python 3.10+ (optional) | Only for the optional Python reference server | `winget install Python.Python.3.12` |
-
-## Build
+Requires stable Rust and Visual Studio Build Tools with **Desktop development with C++**, plus Node.js 20+.
 
 ```powershell
-powershell -File scripts\build-windows.ps1
-cd client
-npm install
-npm run build
+./scripts/build-windows.ps1
+npm ci --prefix client
+npm run build --prefix client
 ```
 
-The script writes `bin\windows\x64\pointhand-computer-use.exe` and a
-`manifest.json` of sha256 and size. Point the client at a custom binary with
-`POINTHAND_HOST`.
+The build writes the native executable and checksum manifest to `bin/windows/x64/`. Configure your MCP client with the absolute `client/dist/index.js` path in this checkout. `POINTHAND_HOST` can select a custom host executable.
 
-MCP client configuration:
-
-```json
-{
-  "mcpServers": {
-    "pointhand": {
-      "command": "node",
-      "args": ["C:/path/to/winpilot/client/dist/index.js"]
-    }
-  }
-}
-```
-
-Python front door:
+To build and verify a portable package:
 
 ```powershell
-python -m pip install -e ".[test]"
-python -m pointhand.server
+./scripts/package-windows.ps1
+./scripts/verify-package.ps1
 ```
 
-## Tests
+</details>
+
+<details>
+<summary><b>Run automated and interactive checks</b></summary>
 
 ```powershell
-python -m pytest
-cargo test --release --manifest-path host\Cargo.toml
-cargo clippy --release --manifest-path host\Cargo.toml -- -D warnings
+npm test --prefix client
+node --test tests/js/*.test.mjs
+cargo test --release --manifest-path host/Cargo.toml
+cargo clippy --release --manifest-path host/Cargo.toml -- -D warnings
 node --test scripts/host-regression.mjs
-cd client; npm test
 ```
 
-Pure logic (keys, coordinates, shapes, allow-list, glass) does not touch the
-desktop. End-to-end scenarios that move the real mouse are skipped unless
-`POINTHAND_E2E=1` is set. `node scripts/mcp-smoke.mjs tools` lists the tools
-through a real MCP client.
+Optional Python checks require `python -m pip install -e ".[test]"`, followed by `python -m pytest`.
 
-## Roadmap
+Interactive tests move the real pointer and open a disposable test window. They use PointHand MCP and require Python with Tkinter:
 
-- [x] Connect Rust mouse/click/stroke activity to PointHand glass frame and cursor
-- [x] Standalone Rust glass renderer without Python
-- [ ] Multi-monitor and mixed-DPI verification
-- [ ] Optional, off-by-default system access (shell, files) with allow-lists and an audit log
-- [ ] `draw_image`: turn a picture into strokes
-- [ ] Reproducible benchmarks
+```powershell
+node scripts/native-input-e2e.mjs
+node scripts/native-multimonitor-e2e.mjs
+node scripts/manual-physical-e2e.mjs
+```
 
-## Clean-room statement
+The multi-monitor test requires an extended second display. The manual test requires you to move a physical mouse or touchpad after drawing starts. Instructions and expected results are in the [validation checklist](docs/release-checklist.md).
 
-PointHand is an independent project. It uses documented Windows APIs
-(`SendInput`, UI Automation, `EnumWindows`, the clipboard, `GetLastInputInfo`)
-and the general idea of pairing a screenshot with an accessibility tree. It
-contains no code from, and is not affiliated with, any vendor computer-use
-product.
+</details>
 
-## License
+## Documentation
 
-MIT. See [LICENSE](LICENSE).
+| Guide | What you will find |
+| :--- | :--- |
+| [Mona Lisa in Paint](examples/mona-lisa/README.md) | Demo, drawing script and reusable stroke plan |
+| [Technical reference](docs/technical-reference.md) | Tool names, coordinates, key aliases, protocol and overlay settings |
+| [Pointer behavior](docs/input-behavior.md) | Motion, acceleration and drawing precision |
+| [Validation checklist](docs/release-checklist.md) | Completed checks and remaining coverage |
+| [Multi-monitor validation](docs/multimonitor-validation.md) | Mixed-DPI measurements and hardware limits |
+| [Changelog](CHANGELOG.md) | Published release and source-branch changes |
 
-## Key and window compatibility
+---
 
-`Control_L+a`, `Return`, `KP_0`, `page_up`, `super`, and left/right Control,
-Shift and Alt aliases use Windows virtual-key codes. Numpad arithmetic aliases
-(Add/Subtract/Multiply/Divide/Decimal) preserve their separate VKs.
-Punctuation includes `period`, `less`, `slash`, `question`, and brackets.
-Use explicit Shift for shifted punctuation: `Control_L+Shift_L+period`.
-Empty chord components are rejected; repeated modifiers are deduplicated.
-
-Rust and Python `brace_chord()` are pure compatibility helpers:
-`Control_L+a` becomes `{Ctrl}a`, and `Return` becomes `{Enter}`.
-Brace syntax stays in the alias table; actual input uses virtual-key codes.
-`type_text` types braces literally.
-
-MCP window actions accept `window: {"id": 123, "app": "...", "title": "..."}`
-as well as `window_id`; `get_window` also accepts `id`.
-`click` accepts `mouse_button` and `click_count`. Conflicting window IDs fail.
-Indexed actions must target the window of the latest UIA snapshot.
-Value and secondary actions now honor the idle guard and allow-list.
-This is parameter compatibility with window2, not the complete sky protocol:
-screenshots retain PointHand PNG/scale output; screenshotId is not supported.
-
-## Verification (2026-10-15)
-
-Python: 48 passed, 8 desktop E2E scenarios skipped. Rust release tests: 18 passed.
-TypeScript build and tests: 13 passed. Real binary regression tests: 4 passed. Tests cover aliases, `parses_sky_style_chord`,
-brace compatibility, malformed chords, allow-lists, accessibility formatting,
-shape paths, window/click parameter compatibility, partial input failures,
-oversized lines/coordinates, native cancellation, process errors and EOF shutdown.
-
-The release host and SHA256/size manifest were regenerated in `bin/windows/x64`.
-`cargo clippy --release -- -D warnings` passes without warnings.
-A real MCP client selected Paint's pencil through PointHand's UIA tree and drew
-seven fish strokes through TypeScript and Rust. Result: `.scratch/paint-fish.png`.
-The latest live test ran with Python explicitly unavailable and exercised the
-native Rust frame/cursor through PointHand MCP. `.scratch/native-overlay-status.json`
-records renderer readiness and frame timings.
-Run `scripts/paint-fish.mjs` only against an observed blank Paint window with
-the matching pixel scale and window border offset. The real desktop test required
-execution outside the command sandbox; initial successful input responses
-inside the sandbox did not produce visible strokes.
-
-## Native cursor performance
-
-The Rust renderer keeps a 128 x 128 cursor surface on a 60 FPS target loop.
-Four small edge-strip windows update the rounded glass frame at 10 FPS;
-the status label and pointer sprite are cached. It reads the actual Windows
-cursor position without easing lag, and draws a trail and click ripple in place.
-Activity is shared in process memory, with no IPC files and no child renderer.
-Hidden surfaces stop rendering. Virtual desktop bounds are refreshed to handle
-resolution changes; multi-monitor/mixed-DPI behavior still needs live verification.
-
-The final live Paint run, with `POINTHAND_ALLOW=mspaint.exe` and Python
-unavailable, reported average active frame-loop FPS of 59.99, a last interval
-of 17,123 microseconds, and 289 microseconds of render work. The renderer was
-ready and reported no error. Normal capture exclusion was also verified with
-the renderer active, and no host or overlay process remained after MCP closed.
-`.scratch/native-overlay.png` shows the native visuals; `.scratch/paint-fish.png`
-shows the normal capture with the overlay excluded. These are host loop timings,
-not a compositor/display refresh guarantee. `overlay_status` includes average
-active FPS, maximum frame interval, last render timing and error details.
-
-The renderer uses documented Win32 layered windows:
-[UpdateLayeredWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-updatelayeredwindow)
-and [SetWindowDisplayAffinity](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowdisplayaffinity).
-
-
-## Creative workflows
-
-[Reproduce the Mona Lisa drawing in Paint](examples/mona-lisa/README.md): includes the public reference, reusable stroke plan, actual Paint result and a silent demo video. Input is delivered through PointHand MCP; the script does not paste a bitmap into Paint.
-
-[Pointer behavior and precision](docs/input-behavior.md) explains natural acceleration, instant positioning and exact drawing geometry.
-
-For a scoped Paint session, set `POINTHAND_ALLOW=mspaint.exe` in the MCP server environment. Full executable paths restrict matching to that specific path. Click and scroll re-check the actual receiving application's permission after pointer travel. Physical intervention interrupts an action and Escape stops mutations. These controls reduce accidental or unauthorized use; they are not an isolation boundary against a malicious local process. No key content is logged by the physical-input guard.
+<p align="center">
+  Built by <a href="https://github.com/ayzekhdawy"><b>@ayzekhdawy</b></a> · <a href="LICENSE">MIT licensed</a><br>
+  <sub>Independent implementation using documented Windows APIs.</sub>
+</p>
