@@ -74,7 +74,7 @@ server.registerTool("emergency_stop", {
 });
 
 server.registerTool("get_system_info", {
-  description: "Physical-pixel virtual desktop bounds and host architecture.",
+  description: "Physical-pixel virtual desktop bounds, monitor/work-area rectangles, per-monitor effective DPI and host architecture.",
   inputSchema: {},
 }, async () => run("get_system_info", {}));
 

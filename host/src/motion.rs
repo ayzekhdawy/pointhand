@@ -1,6 +1,5 @@
 //! Predictable, endpoint-exact pointer motion with gentle acceleration.
 use std::time::{Duration, Instant};
-use uiautomation::{inputs::Mouse, types::Point};
 use windows::Win32::{Foundation::POINT, UI::WindowsAndMessaging::GetCursorPos};
 
 pub fn ease(t: f64) -> f64 {
@@ -9,7 +8,6 @@ pub fn ease(t: f64) -> f64 {
 }
 
 pub fn move_pointer(x: i32, y: i32, instant: bool) -> Result<(), String> {
-    let mouse = Mouse::new().move_time(0);
     let mut start = POINT::default();
     unsafe {
         GetCursorPos(&mut start).map_err(|e| e.to_string())?;
@@ -30,9 +28,7 @@ pub fn move_pointer(x: i32, y: i32, instant: bool) -> Result<(), String> {
         let t = ease(f64::from(step) / f64::from(steps));
         let px = (f64::from(start.x) + (f64::from(x) - f64::from(start.x)) * t).round() as i32;
         let py = (f64::from(start.y) + (f64::from(y) - f64::from(start.y)) * t).round() as i32;
-        mouse
-            .move_to(&Point::new(px, py))
-            .map_err(|e| e.to_string())?;
+        crate::desktop::move_pointer_pixel(px, py)?;
         crate::overlay::touch();
     }
     Ok(())

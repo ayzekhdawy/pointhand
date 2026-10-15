@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Pace overlay frames with an independent waitable timer; input stops do not shut down the renderer.
+- Report per-monitor bounds/effective DPI and per-window DPI; add an interactive mixed-DPI test for extended displays.
+- Correct one-pixel pointer/stroke drift by targeting absolute-coordinate pixel centers, and confirm real foreground activation before injecting input.
+
 - Add `emergency_stop` through the MCP server's out-of-band native event. Long drawings and queued mutations stop without waiting for stdin; guard status reports whether a restart is required.
 - Re-check the active desktop periodically during input and fail closed if physical-input monitoring becomes unavailable.
 - Verify cancellation during a real held-button stroke, including the released Windows button state and blocked queued input.

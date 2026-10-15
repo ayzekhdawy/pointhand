@@ -132,6 +132,7 @@ fn main() {
             && request.method != "ping"
             && request.method != "overlay_status"
             && request.method != "guard_status"
+            && request.method != "get_system_info"
         {
             write_response(
                 &mut stdout,
@@ -140,7 +141,7 @@ fn main() {
                     ok: false,
                     result: None,
                     error: Some(
-                        "stopped by Escape. No further computer-use actions will run.".into(),
+                        "stopped by Escape or emergency stop; restart PointHand to resume.".into(),
                     ),
                 },
             );

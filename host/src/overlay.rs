@@ -641,7 +641,7 @@ fn run(stop: &AtomicBool) -> Result<(), String> {
                 if deadline < Instant::now() {
                     deadline = Instant::now();
                 }
-                thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                crate::timing::frame_sleep(deadline.saturating_duration_since(Instant::now()));
             }
             Ok(())
         })();

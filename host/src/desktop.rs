@@ -20,11 +20,15 @@ use uiautomation::types::{Point, Rect};
 use uiautomation::{UIAutomation, UIElement, UITreeWalker};
 use windows::core::{BOOL, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM};
+use windows::Win32::Graphics::Gdi::{
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
+};
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::HiDpi::{
-    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    GetDpiForMonitor, GetDpiForWindow, SetProcessDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -840,6 +844,7 @@ impl WindowInfo {
             "pid": self.pid,
             "app": self.app,
             "rect": [self.left, self.top, self.right, self.bottom],
+            "dpi": unsafe { GetDpiForWindow(HWND(self.hwnd as *mut std::ffi::c_void)) },
         })
     }
 }
@@ -945,44 +950,48 @@ fn focus(hwnd: isize) -> Result<(), String> {
         AllowSetForegroundWindow, BringWindowToTop, GetAncestor, ASFW_ANY, GA_ROOTOWNER,
     };
     let handle = HWND(hwnd as *mut std::ffi::c_void);
-    unsafe {
+    let active_target = || unsafe {
         let active = GetForegroundWindow();
-        // Preserve keyboard focus inside the target and its owned dialogs.
-        // Re-activating the main window can steal focus from a modal edit field.
-        if active == handle || (!active.0.is_null() && GetAncestor(active, GA_ROOTOWNER) == handle)
-        {
+        active == handle || (!active.0.is_null() && GetAncestor(active, GA_ROOTOWNER) == handle)
+    };
+    for attempt in 0..3 {
+        crate::check_running()?;
+        // Preserve focus in an active target or its owned modal edit field.
+        if active_target() {
             return Ok(());
         }
-        if IsIconic(handle).as_bool() {
-            let _ = ShowWindow(handle, SW_RESTORE);
+        unsafe {
+            if IsIconic(handle).as_bool() {
+                let _ = ShowWindow(handle, SW_RESTORE);
+            }
+            let _ = AllowSetForegroundWindow(ASFW_ANY);
+            let _ = SetForegroundWindow(handle);
+            if !active_target() {
+                let foreground = GetForegroundWindow();
+                let foreground_thread = GetWindowThreadProcessId(foreground, None);
+                let target_thread = GetWindowThreadProcessId(handle, None);
+                let current = GetCurrentThreadId();
+                let attached_foreground = !foreground.0.is_null()
+                    && AttachThreadInput(current, foreground_thread, true).as_bool();
+                let attached_target = AttachThreadInput(current, target_thread, true).as_bool();
+                let _ = BringWindowToTop(handle);
+                let _ = SetForegroundWindow(handle);
+                if attached_target {
+                    let _ = AttachThreadInput(current, target_thread, false);
+                }
+                if attached_foreground {
+                    let _ = AttachThreadInput(current, foreground_thread, false);
+                }
+            }
         }
-        // A fresh process is not the foreground, so Windows refuses the first
-        // SetForegroundWindow. Joining the foreground thread's input queue is
-        // the documented way through that lock.
-        let _ = AllowSetForegroundWindow(ASFW_ANY);
-        if SetForegroundWindow(handle).as_bool() {
+        if active_target() {
             return Ok(());
         }
-        let foreground = GetForegroundWindow();
-        let foreground_thread = GetWindowThreadProcessId(foreground, None);
-        let target_thread = GetWindowThreadProcessId(handle, None);
-        let current = GetCurrentThreadId();
-        let attached_foreground = !foreground.0.is_null()
-            && AttachThreadInput(current, foreground_thread, true).as_bool();
-        let attached_target = AttachThreadInput(current, target_thread, true).as_bool();
-        let _ = BringWindowToTop(handle);
-        let ok = SetForegroundWindow(handle).as_bool();
-        if attached_target {
-            let _ = AttachThreadInput(current, target_thread, false);
-        }
-        if attached_foreground {
-            let _ = AttachThreadInput(current, foreground_thread, false);
-        }
-        if ok {
-            return Ok(());
+        if attempt < 2 {
+            crate::timing::sleep(Duration::from_millis(40))?;
         }
     }
-    Err(format!("could not focus window {hwnd}"))
+    Err(format!("could not focus window {hwnd}; no input was sent"))
 }
 
 // Injection pacing never updates the physical-input activity clock.
@@ -1108,12 +1117,44 @@ fn virtual_screen() -> (i32, i32, i32, i32) {
 }
 
 fn to_absolute(x: i32, y: i32) -> (i32, i32) {
-    let (origin_x, origin_y, width, height) = virtual_screen();
-    let width = (width.max(2) - 1) as i64;
-    let height = (height.max(2) - 1) as i64;
-    let nx = (((x as i64 - origin_x as i64) * 65535) / width).clamp(0, 65535) as i32;
-    let ny = (((y as i64 - origin_y as i64) * 65535) / height).clamp(0, 65535) as i32;
-    (nx, ny)
+    absolute_for_bounds(x, y, virtual_screen())
+}
+
+fn absolute_for_bounds(x: i32, y: i32, bounds: (i32, i32, i32, i32)) -> (i32, i32) {
+    let (left, top, width, height) = bounds;
+    // Windows maps 65536 absolute bins onto the desktop. Aim at each pixel's
+    // center, not its boundary, to avoid flooring into the preceding pixel.
+    let axis = |value: i32, origin: i32, size: i32| {
+        (((i64::from(value) - i64::from(origin)) * 65536 + 32768) / i64::from(size.max(1)))
+            .clamp(0, 65535) as i32
+    };
+    (axis(x, left, width), axis(y, top, height))
+}
+
+pub(crate) fn move_pointer_pixel(x: i32, y: i32) -> Result<(), String> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+    crate::check_running()?;
+    let (dx, dy) = to_absolute(x, y);
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx,
+                dy,
+                mouseData: 0,
+                dwFlags: MOUSEEVENTF_MOVE
+                    | MOUSEEVENTF_ABSOLUTE
+                    | MOUSEEVENTF_VIRTUALDESK
+                    | MOUSEEVENTF_MOVE_NOCOALESCE,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    if unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) } != 1 {
+        return Err("pointer input was blocked".into());
+    }
+    Ok(())
 }
 
 /// Extra time (ms) a stroke waits after pressing and before releasing the button.
@@ -1729,6 +1770,24 @@ mod release_security_tests {
         assert!(!app_allowed("notepad.exe", allow));
         assert!(app_allowed(r"C:\Unapproved\notepad.exe", "notepad"));
     }
+    #[test]
+    fn absolute_coordinates_round_trip_to_pixel_centers_on_negative_desktops() {
+        let bounds = (-1920, -1080, 4480, 2520);
+        for x in [-1920, -1919, -1700, -1, 0, 1919, 2559] {
+            for y in [-1080, -1079, -1, 0, 1079, 1439] {
+                let (ax, ay) = absolute_for_bounds(x, y, bounds);
+                assert_eq!(
+                    i64::from(ax) * i64::from(bounds.2) / 65536 + i64::from(bounds.0),
+                    i64::from(x)
+                );
+                assert_eq!(
+                    i64::from(ay) * i64::from(bounds.3) / 65536 + i64::from(bounds.1),
+                    i64::from(y)
+                );
+            }
+        }
+        assert_eq!(absolute_for_bounds(i32::MIN, i32::MAX, bounds), (0, 65535));
+    }
 }
 
 fn instant_motion(params: &Value) -> Result<bool, String> {
@@ -1740,15 +1799,51 @@ fn instant_motion(params: &Value) -> Result<bool, String> {
 }
 
 pub fn system_info() -> Result<Value, String> {
+    let mut monitors = Vec::<Value>::new();
     unsafe {
+        if !EnumDisplayMonitors(
+            None,
+            None,
+            Some(enum_monitor),
+            LPARAM(&mut monitors as *mut Vec<Value> as isize),
+        )
+        .as_bool()
+        {
+            return Err("cannot enumerate display monitors".into());
+        }
         Ok(json!({"platform":"windows", "arch":std::env::consts::ARCH,
-        "coordinate_space":"physical_pixels", "virtual_screen":{
+        "coordinate_space":"physical_pixels", "monitors":monitors, "virtual_screen":{
             "left":GetSystemMetrics(SM_XVIRTUALSCREEN),
             "top":GetSystemMetrics(SM_YVIRTUALSCREEN),
             "width":GetSystemMetrics(SM_CXVIRTUALSCREEN),
             "height":GetSystemMetrics(SM_CYVIRTUALSCREEN)
         }}))
     }
+}
+
+unsafe extern "system" fn enum_monitor(
+    monitor: HMONITOR,
+    _: HDC,
+    _: *mut windows::Win32::Foundation::RECT,
+    data: LPARAM,
+) -> BOOL {
+    let mut info = MONITORINFOEXW::default();
+    info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+    if !GetMonitorInfoW(monitor, &mut info.monitorInfo).as_bool() {
+        return BOOL(1);
+    }
+    let (mut x, mut y) = (0, 0);
+    let dpi = if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut x, &mut y).is_ok() {
+        json!({"x":x,"y":y,"scale_percent":f64::from(x)*100.0/96.0})
+    } else {
+        Value::Null
+    };
+    let r = info.monitorInfo.rcMonitor;
+    let w = info.monitorInfo.rcWork;
+    let monitors = &mut *(data.0 as *mut Vec<Value>);
+    monitors.push(json!({"device":u16_string(&info.szDevice),"primary":info.monitorInfo.dwFlags & 1 != 0,
+        "rect":[r.left,r.top,r.right,r.bottom],"work_rect":[w.left,w.top,w.right,w.bottom],"dpi":dpi}));
+    BOOL(1)
 }
 
 // Re-check the actual receiving window after pointer travel: another app may

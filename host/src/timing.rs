@@ -45,6 +45,18 @@ impl Drop for Timer {
     }
 }
 thread_local! {static TIMER:Result<Timer,String>=Timer::new();}
+/// Rendering stays alive after an input stop. Do not call the guarded input
+/// sleep here; reuse a timer owned by the rendering thread instead.
+pub fn frame_sleep(duration: Duration) {
+    let waited = TIMER.with(|timer| {
+        timer
+            .as_ref()
+            .is_ok_and(|timer| timer.wait(duration).is_ok())
+    });
+    if !waited {
+        std::thread::sleep(duration);
+    }
+}
 pub fn sleep(duration: Duration) -> Result<(), String> {
     let deadline = std::time::Instant::now() + duration;
     loop {

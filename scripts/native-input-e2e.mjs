@@ -55,6 +55,7 @@ try {
  assert.ok(afterStop.some(e=>e.kind==='release'),'interrupted stroke must release LEFTDOWN');
  assert.ok(afterStop.some(e=>e.kind==='button_state'&&!e.left_down),'OS must report the left button released');
  const overlay=await call('overlay_status');const guard=await call('guard_status');
+ assert.equal(overlay.ready,true,'input cancellation must not terminate the independent overlay renderer');
  assert.equal(guard.stopped,true);
  const report={passed:true,emergency_stop_ms:Math.round(stopLatency),queued_input_blocked:true,left_button_released:true,overlay,guard,event_count:events().length};
  writeFileSync(resolve(scratch,'native-input-e2e.json'),JSON.stringify(report,null,2));

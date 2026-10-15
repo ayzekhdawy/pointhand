@@ -58,4 +58,5 @@ def announce() -> None:
 
 
 root.after(400, announce)
+root.bind_all("<F9>", lambda event: announce())
 root.mainloop()

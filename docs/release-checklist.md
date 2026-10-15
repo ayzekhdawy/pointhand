@@ -9,12 +9,15 @@ The current version remains alpha. Do not label untested behavior complete.
 - [x] Native overlay approximately 60 FPS in the fixture test.
 - [x] Public Mona Lisa assets stripped of source paths and private image metadata.
 - [x] Retest paced scrolling after timing changes.
-- [ ] Multiple monitors, negative coordinates and mixed DPI on actual hardware.
-- [x] MCP emergency stop during a real held-button stroke: 111 ms locally, button released, queued input blocked.
+- [x] Extended virtual-display mixed-DPI test: 1920 × 1080 at 125%, 2560 × 1440 at 100%, exact clicks.
+- [x] Pixel-center normalization and negative-origin coordinate round-trip regression tests.
+- [x] Live negative-origin placement on the virtual display: left=-2560, zero click/stroke endpoint error; original right-side layout restored.
+- [ ] Additional physical-monitor combinations and display disconnection during input.
+- [x] MCP emergency stop during a real held-button stroke: 67–141 ms observed locally, button released, queued input blocked.
 - [x] Fail-closed monitor-loss and physical-intervention policy tests; periodic desktop checks during input.
 - [ ] Actual physical intervention and secure-desktop switching during a long drawing.
 - [x] Portable directory startup without source-tree dependencies.
-- [ ] Hosted Windows ZIP extraction, checksum and isolated-startup verification (new CI step).
+- [x] Hosted Windows ZIP extraction, checksum and isolated-startup verification passed in CI (7125795).
 - [ ] Manual startup on a non-developer Windows machine.
 - [x] Turkish/English alias and pixel-unit checks, plus custom Paint selectors with ambiguity rejection.
 - [x] Fresh local Turkish Paint color-dialog test: edit-colors, RGB update and confirmation via PointHand MCP.
@@ -26,3 +29,5 @@ Build with `scripts/build-windows.ps1`, then run `scripts/package-windows.ps1` t
 Run `node scripts/native-input-e2e.mjs` only in an interactive desktop session: it opens and closes a disposable test window and moves the pointer. It never uses another computer-use provider.
 
 After packaging, run `./scripts/verify-package.ps1` to verify the ZIP hash, binary manifest and isolated MCP startup. `node --test tests/js/*.test.mjs` covers the Paint selector helpers. The interactive native test now holds the mouse button during a long stroke and concurrently calls `emergency_stop`; it checks both the released event and Windows button state. This does not substitute for real physical-intervention or secure-desktop-switch testing.
+
+See [extended-display validation](multimonitor-validation.md) for the Sunshine virtual-display test, its measured DPI/coordinate results and the remaining physical-hardware limits.
