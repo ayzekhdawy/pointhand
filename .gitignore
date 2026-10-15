@@ -19,3 +19,6 @@ artifacts/
 .env.*
 !.env.example
 assets/overlay-demo.png
+
+*.egg-info/
+build/

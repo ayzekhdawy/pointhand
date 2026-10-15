@@ -41,7 +41,7 @@ Extract the ZIP, install Node.js 20 or newer, and configure your MCP client:
 }
 ```
 
-Replace the example path with the extracted package's `client/dist/index.js`. The portable package includes the Rust host and runtime dependencies; it needs no Rust or Python installation. Verify the ZIP hash with `Get-FileHash -Algorithm SHA256` before use. [Mona Lisa tutorial and demo](examples/mona-lisa/README.md) · [Safety](SECURITY.md) · [Known validation gaps](docs/release-checklist.md).
+Replace the example path with the extracted package's `client/dist/index.js`. The portable package includes the Rust host and runtime dependencies; it needs no Rust or Python installation. Verify the ZIP hash with `Get-FileHash -Algorithm SHA256` before use. [Mona Lisa tutorial and demo](examples/mona-lisa/README.md) Â· [Safety](SECURITY.md) Â· [Known validation gaps](docs/release-checklist.md).
 
 ## Layout
 
