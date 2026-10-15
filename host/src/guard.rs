@@ -60,24 +60,49 @@ static READY: AtomicBool = AtomicBool::new(false);
 static LAST_PHYSICAL: AtomicU64 = AtomicU64::new(0);
 static EPOCH: AtomicU64 = AtomicU64::new(0);
 thread_local! {static ACTION_EPOCH:Cell<Option<u64>>=const {Cell::new(None)};}
+thread_local! {static NEXT_DESKTOP_CHECK:Cell<Option<Instant>>=const {Cell::new(None)};}
 pub fn status() -> Value {
-    json!({"ready":READY.load(Ordering::Acquire),"physical_idle_ms":idle_ms(),"physical_events":EPOCH.load(Ordering::Relaxed),"desktop_available":desktop_available().is_ok(),"logs_input_content":false})
+    json!({"ready":READY.load(Ordering::Acquire),"stopped":crate::STOPPED.load(Ordering::Acquire),"physical_idle_ms":idle_ms(),"physical_events":EPOCH.load(Ordering::Relaxed),"desktop_available":desktop_available().is_ok(),"desktop_check_interval_ms":50,"logs_input_content":false})
 }
 pub fn idle_ms() -> u64 {
     unsafe { GetTickCount64().saturating_sub(LAST_PHYSICAL.load(Ordering::Relaxed)) }
 }
 pub fn begin_action() {
     ACTION_EPOCH.with(|slot| slot.set(Some(EPOCH.load(Ordering::Acquire))));
+    NEXT_DESKTOP_CHECK.with(|slot| slot.set(None));
 }
 pub fn end_action() {
     ACTION_EPOCH.with(|slot| slot.set(None));
+    NEXT_DESKTOP_CHECK.with(|slot| slot.set(None));
 }
 pub fn check_action() -> Result<(), String> {
-    ACTION_EPOCH.with(|slot|{
-    if slot.get().is_some_and(|epoch|epoch!=EPOCH.load(Ordering::Acquire)){
-        Err("user_active: physical input interrupted this action; injected buttons are being released".into())
-    }else{Ok(())}
-})
+    let Some(epoch) = ACTION_EPOCH.with(Cell::get) else {
+        return Ok(());
+    };
+    check_monitor(
+        READY.load(Ordering::Acquire),
+        epoch,
+        EPOCH.load(Ordering::Acquire),
+    )?;
+    NEXT_DESKTOP_CHECK.with(|slot| {
+        let now = Instant::now();
+        if slot.get().is_none_or(|next| now >= next) {
+            desktop_available()?;
+            slot.set(Some(now + Duration::from_millis(50)));
+        }
+        Ok(())
+    })
+}
+fn check_monitor(ready: bool, expected: u64, current: u64) -> Result<(), String> {
+    if !ready {
+        return Err(
+            "input_guard_unavailable: physical-input monitoring stopped during this action".into(),
+        );
+    }
+    if expected != current {
+        return Err("user_active: physical input interrupted this action; injected buttons are being released".into());
+    }
+    Ok(())
 }
 pub fn prepare() -> Result<(), String> {
     if !READY.load(Ordering::Acquire) {
@@ -232,6 +257,16 @@ impl Drop for InputGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn active_action_fails_closed_on_monitor_loss_or_physical_intervention() {
+        assert!(check_monitor(true, 7, 7).is_ok());
+        assert!(check_monitor(false, 7, 7)
+            .unwrap_err()
+            .contains("input_guard_unavailable"));
+        assert!(check_monitor(true, 7, 8)
+            .unwrap_err()
+            .contains("user_active"));
+    }
     #[test]
     fn synthetic_events_do_not_look_like_human_input() {
         assert!(!physical(LLMHF_INJECTED, false));

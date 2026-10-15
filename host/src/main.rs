@@ -26,7 +26,7 @@ static STOPPED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn check_running() -> Result<(), String> {
     if STOPPED.load(Ordering::Relaxed) {
-        Err("stopped by Escape. No further computer-use actions will run.".into())
+        Err("stopped by Escape or emergency stop; restart PointHand to resume.".into())
     } else {
         guard::check_action()
     }

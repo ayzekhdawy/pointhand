@@ -61,6 +61,18 @@ server.registerTool("guard_status", {
   inputSchema: {},
 }, async () => run("guard_status", {}));
 
+server.registerTool("emergency_stop", {
+  description: "Stop PointHand immediately, including an active drawing or batch, and release injected inputs. Bypasses the input queue. Restart the MCP server to resume; guard_status remains available.",
+  inputSchema: {},
+}, async () => {
+  try {
+    await host.requestStop();
+    return present({ stop_requested: true, restart_required: true });
+  } catch (error) {
+    return { content: [{ type: "text" as const, text: error instanceof Error ? error.message : String(error) }], isError: true };
+  }
+});
+
 server.registerTool("get_system_info", {
   description: "Physical-pixel virtual desktop bounds and host architecture.",
   inputSchema: {},

@@ -24,7 +24,21 @@ PointHand `list_windows` aracından Paint pencere kimliğini alın. `get_window_
 node scripts/paint-image.mjs <pencere-kimliği> examples/mona-lisa/strokes.json <tuval-sol> <tuval-üst>
 ```
 
-Mevcut betik Türkçe Windows Paint arayüzündeki `Renkleri düzenle`, `RGB onaltılık`, `Tamam` adlarını kullanır. Farklı arayüz dillerinde betikteki bu üç seçiciyi kendi Paint erişilebilirlik ağacındaki adlara uyarlayın. Ad eşleşmesi belirsizse betik durur.
+Kaynak daldaki betik Türkçe adlara ek olarak İngilizce kontrol takma adlarını da içerir. Diğer diller veya farklı Paint sürümleri için kodu değiştirmeden, güncel PointHand erişilebilirlik ağacında gördüğünüz adları bir UTF-8 JSON dosyasına yazabilirsiniz:
+
+```json
+{
+  "editColors": ["Edit colors"],
+  "hex": ["Hex"],
+  "confirm": ["OK"]
+}
+```
+
+```powershell
+node scripts/paint-image.mjs <pencere-kimliği> examples/mona-lisa/strokes.json <tuval-sol> <tuval-üst> --selectors paint-selectors.json
+```
+
+Bu seçenek Alpha 1 sonrasındaki kaynak dalda bulunur; mevcut Alpha 1 indirmesi eski betiği içerir. Türkçe/İngilizce eşleme testleri otomatik çalışır; İngilizce Paint üzerinde canlı doğrulama henüz yapılmamıştır. Ad eşleşmesi belirsizse veya kontrol görünür/etkin değilse betik durur.
 
 Çizim yaklaşık 17 dakika sürmüştür; süre bilgisayara ve Paint sürümüne bağlıdır. Escape işlemi durdurur. Fiziksel fare/klavye müdahalesi etkin işlemi keser. İlerleme `.scratch/` klasörüne yazılır; bu klasör kişisel pencere bilgileri içerebileceğinden paylaşım paketine eklenmemelidir.
 

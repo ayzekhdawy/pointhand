@@ -33,6 +33,8 @@ New-Item -ItemType Directory -Path (Join-Path $packageRoot "scripts") -Force | O
 foreach ($entry in @("paint-image.mjs", "image-stroke-plan.py")) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $entry) -Destination (Join-Path $packageRoot "scripts")
 }
+New-Item -ItemType Directory -Path (Join-Path $packageRoot "scripts/lib") -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "lib/paint-ui.mjs") -Destination (Join-Path $packageRoot "scripts/lib")
 $publicAssets = Join-Path $packageRoot "assets"
 New-Item -ItemType Directory -Path $publicAssets -Force | Out-Null
 foreach ($entry in @("logo.png", "logo-black.png", "logo-sheet.png", "glass-preview.png")) {

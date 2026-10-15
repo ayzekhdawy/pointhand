@@ -39,7 +39,12 @@ canvas.bind("<Button-1>", lambda e: log("click", x=e.x_root, y=e.y_root))
 canvas.bind("<Double-Button-1>", lambda e: log("double", x=e.x_root, y=e.y_root))
 canvas.bind("<Button-3>", lambda e: log("right", x=e.x_root, y=e.y_root))
 canvas.bind("<B1-Motion>", lambda e: log("motion", x=e.x_root, y=e.y_root))
-canvas.bind("<ButtonRelease-1>", lambda e: log("release", x=e.x_root, y=e.y_root))
+def released(event) -> None:
+    log("release", x=event.x_root, y=event.y_root)
+    root.after(80, lambda: log("button_state", left_down=bool(ctypes.windll.user32.GetAsyncKeyState(1) & 0x8000)))
+
+
+canvas.bind("<ButtonRelease-1>", released)
 canvas.bind("<MouseWheel>", lambda e: log("wheel", delta=e.delta))
 entry.bind("<KeyRelease>", lambda e: log("text", value=entry.get()))
 

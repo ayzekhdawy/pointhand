@@ -104,6 +104,25 @@ export class ComputerUseHost {
     });
   }
 
+  /** Signal the native event directly; stdin may be busy drawing. */
+  requestStop(): Promise<void> {
+    if (this.failure) return Promise.reject(this.failure);
+    if (this.closing || !this.child.pid) return Promise.reject(new Error("computer-use host is closing or unavailable"));
+    return new Promise((resolve, reject) => {
+      const stopper = spawn(this.exe, ["--stop-pid", String(this.child.pid)], { stdio: "ignore", windowsHide: true });
+      const timer = setTimeout(() => {
+        stopper.kill();
+        reject(new Error("emergency stop helper timed out"));
+      }, 2_000);
+      stopper.once("error", error => { clearTimeout(timer); reject(error); });
+      stopper.once("close", code => {
+        clearTimeout(timer);
+        if (code === 0) resolve();
+        else reject(new Error(`emergency stop helper failed (${code})`));
+      });
+    });
+  }
+
   async close(): Promise<void> {
     this.closing ??= (async () => {
       try { await this.call("close", {}, 2_000); this.child.stdin.end(); }

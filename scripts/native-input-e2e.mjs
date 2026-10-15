@@ -34,7 +34,29 @@ try {
  const received=events();
  assert.ok(received.some(e=>e.kind==='text'&&e.value==='PointHand 123'),'Unicode input delivered');
  for(const kind of ['click','release','wheel','motion'])assert.ok(received.some(e=>e.kind===kind),`${kind} delivered`);
+ // Interrupt while LEFTDOWN is actually held, rather than merely stopping a wait.
+ const before=events().length;
+ const [left,top]=windows[0].rect;
+ const sx=x+100-left,sy=y+100-top;
+ const drawing=client.callTool({name:'draw_strokes',arguments:{window_id:id,strokes:Array.from({length:12},()=>[sx,sy,sx+150,sy+30]),hold_ms:500,settle_ms:50}});
+ let pressed=false;
+ for(let i=0;i<150&&!pressed;i++){pressed=events().slice(before).some(e=>e.kind==='press');if(!pressed)await pause(10);}
+ assert.ok(pressed,'long stroke actually pressed the left button');
+ const queued=client.callTool({name:'click',arguments:{window_id:id,x:sx+30,y:sy+30}});
+ const stoppedAt=performance.now();
+ const stop=await call('emergency_stop');assert.equal(stop.restart_required,true);
+ const [interrupted,rejected]=await Promise.all([drawing,queued]);
+ assert.equal(interrupted.isError,true);assert.match(JSON.stringify(interrupted.content),/stopped/);
+ assert.equal(rejected.isError,true);assert.match(JSON.stringify(rejected.content),/stopped/);
+ const stopLatency=performance.now()-stoppedAt;assert.ok(stopLatency<1500,'stop must bypass the busy input queue');
+ await pause(150);
+ const afterStop=events().slice(before);
+ assert.equal(afterStop.filter(e=>e.kind==='press').length,1,'queued click and later strokes must not run');
+ assert.ok(afterStop.some(e=>e.kind==='release'),'interrupted stroke must release LEFTDOWN');
+ assert.ok(afterStop.some(e=>e.kind==='button_state'&&!e.left_down),'OS must report the left button released');
  const overlay=await call('overlay_status');const guard=await call('guard_status');
- writeFileSync(resolve(scratch,'native-input-e2e.json'),JSON.stringify({passed:true,overlay,guard,event_count:received.length},null,2));
- console.log(JSON.stringify({passed:true,event_count:received.length,overlay,guard}));
+ assert.equal(guard.stopped,true);
+ const report={passed:true,emergency_stop_ms:Math.round(stopLatency),queued_input_blocked:true,left_button_released:true,overlay,guard,event_count:events().length};
+ writeFileSync(resolve(scratch,'native-input-e2e.json'),JSON.stringify(report,null,2));
+ console.log(JSON.stringify(report));
 } finally {await client.close();fixture.kill();}

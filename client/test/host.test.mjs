@@ -30,3 +30,17 @@ test('close is idempotent and further calls are rejected',async () => {
   const host=create();await host.call('ping');await Promise.all([host.close(),host.close()]);
   await assert.rejects(host.call('late'),/closing|closed/);
 });
+
+test('stop helper failure does not corrupt the host protocol',async () => {
+  const host=create();try {
+    await host.call('ping');
+    // Node is our mock executable and rejects the native-only --stop-pid flag.
+    await assert.rejects(host.requestStop(),/stop helper failed/);
+    assert.equal((await host.call('still_alive')).method,'still_alive');
+  } finally {await host.close();}
+});
+
+test('emergency stop cannot spawn after closing the host',async () => {
+  const host=create();await host.call('ping');await host.close();
+  await assert.rejects(host.requestStop(),/closing|closed/);
+});
