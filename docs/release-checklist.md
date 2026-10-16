@@ -2,6 +2,8 @@
 
 The current version remains alpha. Do not label untested behavior complete.
 
+The README release badge is `assets/release.svg`. It is served from this repository. Update its label when the release tag changes. Do not point it at shields.io: that service reads the GitHub API with a shared token pool and renders "Unable to select next GitHub token from pool" when the pool is empty.
+
 - [x] Rust unit tests and release executable build.
 - [x] TypeScript tests and MCP client build.
 - [x] Native JSONL protocol, cancellation and shutdown regressions.

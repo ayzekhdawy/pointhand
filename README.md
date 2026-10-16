@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/ayzekhdawy/pointhand/actions/workflows/windows.yml"><img src="https://github.com/ayzekhdawy/pointhand/actions/workflows/windows.yml/badge.svg" alt="Windows validation"></a>
-  <a href="https://github.com/ayzekhdawy/pointhand/releases"><img src="https://img.shields.io/github/v/release/ayzekhdawy/pointhand?include_prereleases&label=release&color=6554ef" alt="Latest release"></a>
+  <a href="https://github.com/ayzekhdawy/pointhand/releases"><img src="assets/release.svg" alt="Latest release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22b8cf" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/platform-Windows_10_%2F_11-0078d4" alt="Windows 10 and 11">
 </p>
