@@ -8,6 +8,6 @@ The native host pauses for physical-input idle and interrupts the current action
 
 The overlay is excluded from capture by default and does not accept clicks. This is a capture behavior for PointHand's own UI, not protection for other desktop content. Secure-desktop input is refused.
 
-Do not include `.scratch/`, environment files, logs, checkpoints or personal screenshots in public reports. Report a suspected security issue privately to the repository maintainer before posting reproduction data publicly. A dedicated private reporting channel has not yet been configured.
+Do not include `.scratch/`, environment files, logs, checkpoints or personal screenshots in public reports. Report suspected vulnerabilities through [GitHub private vulnerability reporting](https://github.com/ayzekhdawy/pointhand/security/advisories/new). Do not disclose reproduction data in public issues before coordinated review.
 
-Source builds after Alpha 1 expose `emergency_stop` over MCP. It signals the native event outside the input queue and leaves the host stopped until restart. Active input also rechecks desktop availability at a target interval of 50 ms and refuses to continue if physical-input monitoring is lost. Scheduling delays and native UIA calls can affect response time; this is not a hard real-time guarantee.
+Alpha 2 exposes `emergency_stop` over MCP. It signals the native event outside the input queue and leaves the host stopped until restart. Active input also rechecks desktop availability at a target interval of 50 ms and refuses to continue if physical-input monitoring is lost. Scheduling delays and native UIA calls can affect response time; this is not a hard real-time guarantee.

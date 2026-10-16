@@ -1,6 +1,9 @@
 # Changes
 
-## Unreleased
+## v0.2.0-alpha.2
+
+- Open community contributions with bilingual guidance, issue/PR templates and a public launch kit.
+- Refresh the README showcase with a looping GIF of the actual Paint drawing.
 
 - Add a repeatable manual physical-mouse interruption test; verify active drawing cancellation and released button state on the secondary virtual display.
 
@@ -14,7 +17,7 @@
 - Support Turkish/English Paint selector aliases, pixel units and explicit per-control name mappings for other languages. Ambiguous matches stop the example.
 - Verify ZIP checksums, executable manifests and isolated MCP startup from an extracted package in Windows CI.
 
-These changes are in the source branch and are not included in the existing v0.2.0-alpha.1 download.
+These changes are included in Alpha 2. The existing v0.2.0-alpha.1 download remains unchanged.
 
 ## v0.2.0-alpha.1
 

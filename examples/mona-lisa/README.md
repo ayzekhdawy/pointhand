@@ -28,7 +28,7 @@ PointHand `list_windows` aracından Paint pencere kimliğini alın. `get_window_
 node scripts/paint-image.mjs <pencere-kimliği> examples/mona-lisa/strokes.json <tuval-sol> <tuval-üst>
 ```
 
-Kaynak daldaki betik Türkçe adlara ek olarak İngilizce kontrol takma adlarını da içerir. Diğer diller veya farklı Paint sürümleri için kodu değiştirmeden, güncel PointHand erişilebilirlik ağacında gördüğünüz adları bir UTF-8 JSON dosyasına yazabilirsiniz:
+Alpha 2 betiği Türkçe adlara ek olarak İngilizce kontrol takma adlarını da içerir. Diğer diller veya farklı Paint sürümleri için kodu değiştirmeden, güncel PointHand erişilebilirlik ağacında gördüğünüz adları bir UTF-8 JSON dosyasına yazabilirsiniz:
 
 ```json
 {

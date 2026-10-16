@@ -1,0 +1,32 @@
+name: Compatibility test / Uyumluluk testi
+description: Share a clean installation, app or display/DPI test result.
+labels: [testing]
+body:
+  - type: markdown
+    attributes:
+      value: "Test only in your own supervised session using disposable documents. Reports in Turkish or English are welcome."
+  - type: input
+    id: version
+    attributes:
+      label: PointHand version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: Test setup
+      description: Windows/Node/app versions, MCP client, physical or virtual displays, resolutions, DPI and display positions. No personal device identifiers.
+    validations:
+      required: true
+  - type: textarea
+    id: procedure
+    attributes:
+      label: Procedure and results
+      description: Describe checks, expected/actual results and any failures. Distinguish observed behavior from assumptions.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Optional redacted evidence
+      description: Remove personal names, notifications, paths and secrets before uploading.

@@ -21,7 +21,7 @@ New-Item -ItemType Directory -Path (Join-Path $packageRoot "client") -Force | Ou
 foreach ($entry in @("package.json", "package-lock.json", "dist")) {
     Copy-Item -LiteralPath (Join-Path $projectRoot "client/$entry") -Destination (Join-Path $packageRoot "client") -Recurse
 }
-foreach ($entry in @("bin", "docs", "examples", "README.md", "LICENSE", "SECURITY.md")) {
+foreach ($entry in @("bin", "docs", "examples", "README.md", "LICENSE", "SECURITY.md", "CONTRIBUTING.md", "CHANGELOG.md")) {
     Copy-Item -LiteralPath (Join-Path $projectRoot $entry) -Destination $packageRoot -Recurse
 }
 Push-Location (Join-Path $packageRoot "client")

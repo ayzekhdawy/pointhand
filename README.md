@@ -21,6 +21,7 @@
   <a href="#quick-start"><b>Quick start</b></a> ·
   <a href="examples/mona-lisa/README.md"><b>Mona Lisa demo</b></a> ·
   <a href="docs/technical-reference.md"><b>API reference</b></a> ·
+  <a href="CONTRIBUTING.md"><b>Contribute</b></a> ·
   <a href="https://github.com/ayzekhdawy/pointhand/issues"><b>Feedback</b></a>
 </p>
 
@@ -57,7 +58,7 @@ PointHand reproduced the Mona Lisa in Microsoft Paint through its own MCP server
 
 The TypeScript MCP server connects your agent to a native Rust host. Windows input, accessibility and the overlay run in that host. The portable package needs **Node.js 20+**; Rust and Python are only needed for development or optional components.
 
-**Release status:** PointHand is an alpha for supervised workflows. The published **v0.2.0-alpha.1** package has 25 tools. The current source branch adds `emergency_stop`, monitor/DPI diagnostics and further input fixes, bringing it to 26 tools. See the [changelog](CHANGELOG.md) before choosing a build.
+**Release status:** **v0.2.0-alpha.2** is an alpha for supervised workflows with 26 MCP tools, including `emergency_stop` and monitor/DPI diagnostics. See the [release notes](docs/releases/alpha-2.md) and [validation limits](docs/release-checklist.md). Alpha 1 remains available as an older 25-tool build.
 
 ## Quick start
 
@@ -92,13 +93,13 @@ For the complete portrait workflow, follow the [Mona Lisa tutorial](examples/mon
 - **Native feedback:** a click-through glass frame, activity label, cursor trail and click ripple show PointHand's activity. The overlay targets 60 FPS and is excluded from screenshots by default.
 - **Physical intervention:** moving your mouse interrupts the active action. Physical Escape stops further mutations until the server restarts.
 - **Scoped access:** restrict receiving apps with executable names or exact paths in `POINTHAND_ALLOW`.
-- **Input cleanup:** interrupted strokes release held buttons. The source branch also provides an out-of-band `emergency_stop` tool that stops active and queued mutations until restart.
+- **Input cleanup:** interrupted strokes release held buttons. Alpha 2 also provides an out-of-band `emergency_stop` tool that stops active and queued mutations until restart.
 
 Use PointHand in a supervised desktop session. App permissions are a guardrail, not a sandbox against malicious local software. Screenshots capture visible pixels; an obscured window is not a background rendering surface, and elevated windows can reject input. Read the [security policy](SECURITY.md) and [input behavior guide](docs/input-behavior.md).
 
 ## Tested on the desktop
 
-| Scenario | Current source validation |
+| Scenario | Alpha 2 validation |
 | :--- | :--- |
 | Paint drawing | Live strokes, shapes and Turkish color-dialog controls through PointHand MCP |
 | Extended desktop | 125% primary + 100% virtual secondary, streamed to a phone with Sunshine |
@@ -110,6 +111,17 @@ Use PointHand in a supervised desktop session. App permissions are a guardrail, 
 Streamed mixed-DPI overlay runs averaged approximately **57–59 FPS** at a 60 FPS target. These are observed renderer timings, not a display-refresh guarantee.
 
 Secure-desktop switching, display disconnection during input, more physical monitor combinations and a clean non-developer PC remain to verify. See the [full validation checklist](docs/release-checklist.md) and [multi-monitor report](docs/multimonitor-validation.md).
+
+## Help shape PointHand
+
+Contributions are welcome in **English or Turkish**. You can help with code, documentation, creative examples or compatibility reports.
+
+- **New here?** Pick a [good first issue](https://github.com/ayzekhdawy/pointhand/labels/good%20first%20issue).
+- **Have a Windows setup to test?** Share a [compatibility report](https://github.com/ayzekhdawy/pointhand/issues/new?template=compatibility_report.yml).
+- **Ready to build?** Read [CONTRIBUTING.md](CONTRIBUTING.md) and browse [help wanted](https://github.com/ayzekhdawy/pointhand/labels/help%20wanted).
+- **Have an idea?** Propose a [workflow or creative example](https://github.com/ayzekhdawy/pointhand/issues/new?template=feature_request.yml).
+
+We especially need clean-install reports, English Paint checks and more physical-monitor/DPI coverage. Small, reproducible contributions help make the next release stronger.
 
 ## Develop PointHand
 

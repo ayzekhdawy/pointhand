@@ -1,0 +1,39 @@
+name: Bug report / Hata bildirimi
+description: Report a reproducible problem. Do not disclose security vulnerabilities here.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Turkish or English is welcome. For vulnerabilities, follow SECURITY.md. Remove personal paths, account names and secrets from evidence."
+  - type: input
+    id: version
+    attributes:
+      label: PointHand version or commit
+      placeholder: v0.2.0-alpha.2
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Windows version, Node version, MCP client, target app/version, monitor layout and DPI.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Use a disposable document. Include relevant configuration without private paths or credentials.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted evidence and error messages
+      description: Check screenshots and logs for private information before attaching.

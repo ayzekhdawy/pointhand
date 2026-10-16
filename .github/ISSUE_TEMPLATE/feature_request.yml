@@ -1,0 +1,26 @@
+name: Feature or creative example / Öneri
+description: Suggest a workflow, improvement or reusable creative example.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: Workflow or problem
+      description: What are you trying to achieve, and with which app?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior or example
+      description: Include alternatives, scope and expected benefit. For media, explain its source and license.
+    validations:
+      required: true
+  - type: dropdown
+    id: participation
+    attributes:
+      label: How would you like to help?
+      options:
+        - Feedback or discussion
+        - Testing or documentation
+        - Implementation or example

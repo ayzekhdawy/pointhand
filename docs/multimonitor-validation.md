@@ -1,6 +1,6 @@
 # Extended-display validation
 
-`get_system_info` now reports physical-pixel monitor/work-area rectangles and effective DPI. Window metadata also includes `dpi`. These fields are source-branch additions after Alpha 1.
+`get_system_info` now reports physical-pixel monitor/work-area rectangles and effective DPI. Window metadata also includes `dpi`. These fields are available in Alpha 2.
 
 The live test used an extended Windows desktop with a physical 1920 × 1080 primary display at 125% (120 DPI) and a 2560 × 1440 virtual secondary display at 100% (96 DPI), streamed to a phone through Sunshine. The virtual desktop measured 4480 × 1440. A second run temporarily placed the virtual display to the left at [-2560, 0, 0, 1440], then restored its original right-side position [1920, 0, 4480, 1440].
 

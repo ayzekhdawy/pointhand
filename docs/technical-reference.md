@@ -2,7 +2,7 @@
 
 [← Back to PointHand](../README.md)
 
-Implementation details and API conventions for the current source branch. See the [changelog](../CHANGELOG.md) for differences from the Alpha 1 download.
+Implementation details and API conventions for Alpha 2. See the [changelog](../CHANGELOG.md) for differences from the Alpha 1 download.
 
 ## Layout
 | Piece | Role |
@@ -14,8 +14,7 @@ Implementation details and API conventions for the current source branch. See th
 
 One JSON object per line. A request is `{"id","method","params"}`. A response is
 `{"id","ok","result"}` or `{"id","ok":false,"error"}`. The client passes
-`--parent-pid` so the host exits with it. Physical Escape interrupts strokes, typing, idle waits and batch waits. The source
-branch also exposes an out-of-band MCP `emergency_stop` tool.
+`--parent-pid` so the host exits with it. Physical Escape interrupts strokes, typing, idle waits and batch waits. Alpha 2 also exposes an out-of-band MCP `emergency_stop` tool.
 Input requests are bounded to 4 MiB; oversized or invalid UTF-8 lines are drained
 and rejected without breaking the next request.
 
@@ -30,9 +29,9 @@ target forward before a shot.
 `paste`, `clipboard_read`, `clipboard_write`, `batch`, `overlay_status`,
 `guard_status`, `get_system_info`, `draw_strokes`, `emergency_stop`.
 
-`emergency_stop` is a source-branch addition after Alpha 1: it interrupts active
+`emergency_stop` is available in Alpha 2: it interrupts active
 input without waiting for the request queue. Restart the MCP server to resume.
-See [unreleased changes](../CHANGELOG.md); the existing Alpha 1 ZIP has 25 tools.
+See [release changes](../CHANGELOG.md); the existing Alpha 1 ZIP has 25 tools.
 
 `draw_shape` traces a line, ellipse, rectangle, polygon, star, heart, spiral, or
 zigzag with the left button held (pick a pen in the app first). `screenshot`
