@@ -34,10 +34,12 @@ PointHand reproduced the Mona Lisa in Microsoft Paint through its own MCP server
   <tr>
     <th align="center">The reference</th>
     <th align="center">Drawn in Paint</th>
+    <th align="center">Watch it take shape</th>
   </tr>
   <tr>
-    <td align="center" width="50%"><img src="examples/mona-lisa/reference.png" alt="Mona Lisa reference painting" width="240"></td>
-    <td align="center" width="50%"><img src="examples/mona-lisa/result.png" alt="Mona Lisa recreated in Paint with PointHand mouse strokes" width="240"></td>
+    <td align="center" width="33%"><img src="examples/mona-lisa/reference.png" alt="Mona Lisa reference painting" width="220"></td>
+    <td align="center" width="33%"><img src="examples/mona-lisa/result.png" alt="Mona Lisa recreated in Paint with PointHand mouse strokes" width="220"></td>
+    <td align="center" width="33%"><a href="examples/mona-lisa/demo.mp4"><img src="examples/mona-lisa/demo.gif" alt="Animated recording of PointHand drawing the Mona Lisa in Paint" width="184"></a></td>
   </tr>
 </table>
 

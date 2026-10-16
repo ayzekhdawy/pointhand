@@ -6,6 +6,10 @@ Bu örnek resmi Paint'e yapıştırmaz. PointHand kendi MCP sunucusuyla renk se�
 
 [Çizim videosu](demo.mp4). Paylaşım kopyası ses ve kaynak metadata içermez. PNG kopyalarındaki metadata temizlenmiştir; kaynak dosyalar değiştirilmemiştir.
 
+[![PointHand çizim kaydının döngülü GIF önizlemesi](demo.gif)](demo.mp4)
+
+GIF, aynı kaydın 240 piksel genişlikte, 10 FPS döngülü önizlemesidir. Tam videoyu açmak için görsele tıklayın.
+
 Depo kökünde Node.js bağımlılıklarını kurun ve yerel Rust sunucusunu derleyin:
 
 ```powershell
