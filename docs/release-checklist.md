@@ -14,8 +14,8 @@ The current version remains alpha. Do not label untested behavior complete.
 - [x] Live negative-origin placement on the virtual display: left=-2560, zero click/stroke endpoint error; original right-side layout restored.
 - [ ] Additional physical-monitor combinations and display disconnection during input.
 - [x] MCP emergency stop during a real held-button stroke: 67–141 ms observed locally, button released, queued input blocked.
-- [x] Fail-closed monitor-loss and physical-intervention policy tests; periodic desktop checks during input.
-- [x] Actual physical mouse intervention during held-button drawing on the secondary virtual display; action interrupted and Windows left-button state released.
+- [x] Fail-closed monitor-loss policy tests; periodic desktop checks during input. Mouse movement does not cancel a started action.
+- [x] Earlier Alpha 2 run: physical mouse movement during a held-button drawing returned `user_active` and released the button. Current builds keep drawing until Escape or `emergency_stop`.
 - [ ] Secure-desktop switching during a long drawing.
 - [x] Portable directory startup without source-tree dependencies.
 - [x] Hosted Windows ZIP extraction, checksum and isolated-startup verification passed in CI (7125795).
@@ -33,4 +33,4 @@ After packaging, run `./scripts/verify-package.ps1` to verify the ZIP hash, bina
 
 See [extended-display validation](multimonitor-validation.md) for the Sunshine virtual-display test, its measured DPI/coordinate results and the remaining physical-hardware limits.
 
-For a manual physical-input check, run `node scripts/manual-physical-e2e.mjs` from a source checkout with Python/Tkinter installed. Keep the physical mouse still during setup; when the fixture says “Çizim başlayınca oynat” and the pointer starts drawing, move the real mouse or touchpad. The test requires an actual held-button stroke, a physical-hook event, a `user_active` interruption and a released Windows button state. It closes its fixture and stores the report under ignored `.scratch/`. Ordinary physical intervention cancels the active action; it does not permanently stop future requests as `emergency_stop` does.
+For a manual input check, run `node scripts/manual-physical-e2e.mjs` from a source checkout with Python/Tkinter installed. Keep the physical mouse still during setup. The drawing is expected to finish if the mouse moves. Escape, not mouse movement, cancels the active stroke and later requests until restart. The script closes its fixture and stores the report under ignored `.scratch/`.

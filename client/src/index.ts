@@ -4,7 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 import { ComputerUseHost } from "./host.js";
-import { normalizeParams } from "./compat.js";
+import { normalizeParams, presentPayload } from "./compat.js";
 import { shapePoints } from "./shapes.js";
 
 const host = new ComputerUseHost(ComputerUseHost.locate());
@@ -18,28 +18,17 @@ type ToolResult = {
   isError?: boolean;
 };
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
-  }
-  return null;
-}
-
 function present(value: unknown): ToolResult {
-  const record = asRecord(value);
-  const shot = asRecord(record?.screenshot);
-  const png = typeof shot?.png_base64 === "string" ? shot.png_base64 : null;
-  if (record && shot && png) {
-    const copy = { ...record, screenshot: { ...shot } };
-    delete (copy.screenshot as Record<string, unknown>).png_base64;
+  const payload = presentPayload(value);
+  if (payload.images.length > 0) {
     return {
       content: [
-        { type: "text", text: JSON.stringify(copy) },
-        { type: "image", data: png, mimeType: "image/png" },
+        { type: "text", text: payload.text },
+        ...payload.images.map((data) => ({ type: "image" as const, data, mimeType: "image/png" })),
       ],
     };
   }
-  return { content: [{ type: "text", text: JSON.stringify(value) }] };
+  return { content: [{ type: "text", text: payload.text }] };
 }
 
 async function run(method: string, params: unknown, timeoutMs = 20_000): Promise<ToolResult> {
@@ -83,8 +72,9 @@ const window = z.object({ id: z.number().int().positive(), app: z.string().optio
 const target = { window_id: windowId.optional(), window };
 const point = {
   motion: z.enum(["natural", "instant"]).optional().describe("Natural eases pointer acceleration and deceleration; instant moves directly. Drawing paths remain exact."),
-  x: z.number().int().optional().describe("X in window pixels when window_id is set, otherwise screen pixels."),
-  y: z.number().int().optional().describe("Y in window pixels when window_id is set, otherwise screen pixels."),
+  x: z.number().int().optional().describe("Physical pixels inside the screenshotId region, window pixels when only window_id is set, otherwise screen pixels."),
+  y: z.number().int().optional().describe("Physical pixels inside the screenshotId region, window pixels when only window_id is set, otherwise screen pixels."),
+  screenshotId: z.string().min(1).optional().describe("Window, monitor slice, owned popup, or monitor screenshot. x and y are physical pixels inside that region."),
   ...target,
   element_index: z.number().int().optional().describe("Index from the latest accessibility tree. Preferred over x,y."),
 };
@@ -104,7 +94,7 @@ server.registerTool(
 server.registerTool(
   "list_windows",
   {
-    description: "Visible top-level windows. Each id is the window handle to pass to other tools.",
+    description: "Visible top-level windows. Each id is the window handle to pass to other tools. monitors lists each display the window rectangle overlaps.",
     inputSchema: { query: z.string().optional() },
   },
   async (args) => run("list_windows", args),
@@ -141,9 +131,10 @@ server.registerTool(
   "get_window_state",
   {
     description:
-      "Foreground the window, then return its rectangle, an optional accessibility tree, and an optional PNG. " +
-      "Coordinates in the image are window pixels divided by screenshot.scale. " +
-      "The shot is the visible desktop at the window rectangle; pixels hidden behind other windows are whatever is in front.",
+      "Foreground the window, then return its rectangle, the monitors it touches, optional accessibility fields, and optional PNGs. " +
+      "A window that crosses monitors also returns one screenshot per monitor intersection. Owned popups are separate regions. " +
+      "Pass a region's screenshotId to click, drag, scroll, or move. x and y are physical pixels inside that region, not image pixels: divide image pixels by scale. " +
+      "The id must belong to the latest capture, and the window or popup must still be where it was captured.",
     inputSchema: {
       ...target,
       include_screenshot: z.boolean().optional(),
@@ -157,13 +148,14 @@ server.registerTool(
 server.registerTool(
   "click",
   {
-    description: "Click an accessibility element, a point inside a window, or a screen point. button is left, right, or middle.",
+    description: "Click an accessibility element, a point inside a window, or a screen point. button is left, right, or middle. screenshotId selects a window, monitor slice, owned popup, or monitor screenshot. x and y are physical pixels inside that region.",
     inputSchema: {
       ...point,
       button: z.enum(["left", "right", "middle"]).optional(),
       mouse_button: z.enum(["left", "right", "middle", "l", "r", "m"]).optional(),
       click_count: z.number().int().min(1).max(2).optional(),
       count: z.number().int().optional().describe("2 double-clicks."),
+      screenshotId: z.string().min(1).optional(),
     },
   },
   async (args) => run("click", args),
@@ -235,8 +227,9 @@ server.registerTool(
   "screenshot",
   {
     description:
-      "Screenshot of the whole desktop or a region. region is [left, top, right, bottom] in screen pixels. " +
-      "The result states the scale; screen = region origin + image pixel / scale.",
+      "Screenshot of the whole desktop or a region. screenshots[0] is the combined virtual desktop, or the requested region. " +
+      "Each other monitor is a later entry with its own origin. Pass that screenshotId to click, drag, scroll, or move. " +
+      "x and y are physical pixels inside that region. screen = originX + x. Divide image pixels by scale first.",
     inputSchema: {
       scale: z.number().optional().describe("Longest-edge scale, capped so the image stays under 1568px. Default 0.5."),
       region: z.tuple([z.number().int(), z.number().int(), z.number().int(), z.number().int()]).optional(),
@@ -248,7 +241,7 @@ server.registerTool(
 server.registerTool(
   "move",
   {
-    description: "Move the pointer to an accessibility element, a point inside a window, or a screen point without clicking.",
+    description: "Move the pointer without clicking. screenshotId selects a window, monitor slice, owned popup, or monitor screenshot. x and y are physical pixels inside that region. Without it, they are window pixels when window_id is set, otherwise screen pixels.",
     inputSchema: { ...point },
   },
   async (args) => run("move", args),
@@ -257,13 +250,14 @@ server.registerTool(
 server.registerTool(
   "drag",
   {
-    description: "Drag with the left button. from_x/from_y/to_x/to_y are window pixels when window_id is set.",
+    description: "Drag with the left button. With screenshotId, from_x and from_y must lie inside that region. to_x and to_y use the same origin and may leave the region, including onto another monitor. Without it, coordinates are window pixels when window_id is set, otherwise screen pixels. The region must be from the latest capture and still in place.",
     inputSchema: {
       ...target,
       from_x: z.number().int(),
       from_y: z.number().int(),
       to_x: z.number().int(),
       to_y: z.number().int(),
+      screenshotId: z.string().min(1).optional(),
     },
   },
   async (args) => run("drag", args),
@@ -272,11 +266,12 @@ server.registerTool(
 server.registerTool(
   "scroll",
   {
-    description: "Move to a point and scroll. Positive scrollY moves the page down. Positive scrollX moves right.",
+    description: "Move to a point and scroll. Positive scrollY moves the page down. Positive scrollX moves right. With screenshotId, x and y are physical pixels inside that window, monitor slice, owned popup, or monitor. The region must be from the latest capture and still in place.",
     inputSchema: {
       ...point,
       scrollX: z.number().int().optional(),
       scrollY: z.number().int().optional(),
+      screenshotId: z.string().min(1).optional(),
     },
   },
   async (args) => run("scroll", args),

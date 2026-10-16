@@ -44,7 +44,7 @@ node scripts/paint-image.mjs <pencere-kimliği> examples/mona-lisa/strokes.json 
 
 Bu seçenek Alpha 1 sonrasındaki kaynak dalda bulunur; mevcut Alpha 1 indirmesi eski betiği içerir. Türkçe/İngilizce eşleme testleri otomatik çalışır; İngilizce Paint üzerinde canlı doğrulama henüz yapılmamıştır. Ad eşleşmesi belirsizse veya kontrol görünür/etkin değilse betik durur.
 
-Çizim yaklaşık 17 dakika sürmüştür; süre bilgisayara ve Paint sürümüne bağlıdır. Escape işlemi durdurur. Fiziksel fare/klavye müdahalesi etkin işlemi keser. İlerleme `.scratch/` klasörüne yazılır; bu klasör kişisel pencere bilgileri içerebileceğinden paylaşım paketine eklenmemelidir.
+Çizim yaklaşık 17 dakika sürmüştür; süre bilgisayara ve Paint sürümüne bağlıdır. Başlamış çizimi fare hareketi veya tıklama kesmez. Escape işlemi durdurur. İlerleme `.scratch/` klasörüne yazılır; bu klasör kişisel pencere bilgileri içerebileceğinden paylaşım paketine eklenmemelidir.
 
 Hazır plan Python gerektirmez. Kendi referansınız için Pillow kurarak yeni plan üretebilirsiniz:
 

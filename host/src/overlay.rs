@@ -411,7 +411,7 @@ fn label(surface: &mut Surface) -> Result<(), String> {
         let old = SelectObject(surface.dc, HGDIOBJ(font.0));
         SetBkMode(surface.dc, TRANSPARENT);
         SetTextColor(surface.dc, COLORREF(0xFFFFFF));
-        let mut text = "PointHand is controlling this PC  -  touch the mouse to pause"
+        let mut text = "PointHand is controlling this PC  -  press Escape to stop"
             .encode_utf16()
             .collect::<Vec<_>>();
         let mut rect = RECT {

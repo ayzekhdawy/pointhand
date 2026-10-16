@@ -76,14 +76,12 @@ pub fn end_action() {
     NEXT_DESKTOP_CHECK.with(|slot| slot.set(None));
 }
 pub fn check_action() -> Result<(), String> {
-    let Some(epoch) = ACTION_EPOCH.with(Cell::get) else {
+    if ACTION_EPOCH.with(Cell::get).is_none() {
         return Ok(());
-    };
-    check_monitor(
-        READY.load(Ordering::Acquire),
-        epoch,
-        EPOCH.load(Ordering::Acquire),
-    )?;
+    }
+    // Mouse movement, clicks, and keys other than Escape update the idle clock
+    // only. They must not abandon a stroke that has already started.
+    check_monitor(READY.load(Ordering::Acquire))?;
     NEXT_DESKTOP_CHECK.with(|slot| {
         let now = Instant::now();
         if slot.get().is_none_or(|next| now >= next) {
@@ -93,16 +91,18 @@ pub fn check_action() -> Result<(), String> {
         Ok(())
     })
 }
-fn check_monitor(ready: bool, expected: u64, current: u64) -> Result<(), String> {
+fn check_monitor(ready: bool) -> Result<(), String> {
     if !ready {
         return Err(
             "input_guard_unavailable: physical-input monitoring stopped during this action".into(),
         );
     }
-    if expected != current {
-        return Err("user_active: physical input interrupted this action; injected buttons are being released".into());
-    }
     Ok(())
+}
+
+/// Escape is the only physical input that cancels work already in progress.
+fn cancels_started_work(keyboard: bool, virtual_key: u32) -> bool {
+    keyboard && virtual_key == VK_ESCAPE.0 as u32
 }
 pub fn prepare() -> Result<(), String> {
     if !READY.load(Ordering::Acquire) {
@@ -172,7 +172,7 @@ unsafe extern "system" fn key_hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT
         let data = &*(lp.0 as *const KBDLLHOOKSTRUCT);
         if physical(data.flags.0, true) {
             record();
-            if data.vkCode == VK_ESCAPE.0 as u32
+            if cancels_started_work(true, data.vkCode)
                 && [WM_KEYDOWN as usize, WM_SYSKEYDOWN as usize].contains(&wp.0)
             {
                 crate::STOPPED.store(true, Ordering::Release);
@@ -258,14 +258,17 @@ impl Drop for InputGuard {
 mod tests {
     use super::*;
     #[test]
-    fn active_action_fails_closed_on_monitor_loss_or_physical_intervention() {
-        assert!(check_monitor(true, 7, 7).is_ok());
-        assert!(check_monitor(false, 7, 7)
+    fn active_action_fails_closed_when_monitoring_stops() {
+        assert!(check_monitor(true).is_ok());
+        assert!(check_monitor(false)
             .unwrap_err()
             .contains("input_guard_unavailable"));
-        assert!(check_monitor(true, 7, 8)
-            .unwrap_err()
-            .contains("user_active"));
+    }
+    #[test]
+    fn only_escape_cancels_work_that_has_started() {
+        assert!(!cancels_started_work(false, 0x01));
+        assert!(!cancels_started_work(true, 0x41));
+        assert!(cancels_started_work(true, 0x1B));
     }
     #[test]
     fn synthetic_events_do_not_look_like_human_input() {

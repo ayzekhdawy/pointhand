@@ -1,5 +1,11 @@
 # Changes
 
+## Unreleased
+
+- Bind `click`, `drag`, and `scroll` to the latest per-window `screenshotId`, and return screenshot id, origin, and accessibility text fields beside the existing PNG/scale result.
+- A started action continues when the mouse moves or clicks. Physical Escape and `emergency_stop` still cancel it. A new action still waits until the pointer has been idle.
+- Multi-monitor actions use bounded regions. A window that crosses displays, each monitor screenshot, and an owned popup has its own `screenshotId` and screen origin. `list_windows` reports the monitors a window touches.
+
 ## v0.2.0-alpha.2
 
 - Open community contributions with bilingual guidance, issue/PR templates and a public launch kit.

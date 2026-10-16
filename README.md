@@ -91,7 +91,7 @@ For the complete portrait workflow, follow the [Mona Lisa tutorial](examples/mon
 ## Visible control. A clear way to stop.
 
 - **Native feedback:** a click-through glass frame, activity label, cursor trail and click ripple show PointHand's activity. The overlay targets 60 FPS and is excluded from screenshots by default.
-- **Physical intervention:** moving your mouse interrupts the active action. Physical Escape stops further mutations until the server restarts.
+- **Stop:** once an action has started, mouse movement and clicks do not cancel it. Physical Escape stops further mutations until the server restarts.
 - **Scoped access:** restrict receiving apps with executable names or exact paths in `POINTHAND_ALLOW`.
 - **Input cleanup:** interrupted strokes release held buttons. Alpha 2 also provides an out-of-band `emergency_stop` tool that stops active and queued mutations until restart.
 
@@ -104,7 +104,7 @@ Use PointHand in a supervised desktop session. App permissions are a guardrail, 
 | Paint drawing | Live strokes, shapes and Turkish color-dialog controls through PointHand MCP |
 | Extended desktop | 125% primary + 100% virtual secondary, streamed to a phone with Sunshine |
 | Coordinate precision | Exact click and stroke endpoints with the secondary display on either side |
-| Physical interruption | User mouse movement interrupted a held-button drawing; Windows confirmed button release |
+| Stop | Escape and `emergency_stop` cancel a held-button drawing and release the button. Mouse movement does not. |
 | Emergency stop | Active drawing cancelled, held button released and queued mutation blocked |
 | Portable package | Windows CI checks ZIP extraction, SHA-256, executable manifest and isolated MCP startup |
 

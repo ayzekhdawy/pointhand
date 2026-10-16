@@ -13,7 +13,8 @@ use base64::Engine;
 use serde_json::{json, Value};
 use uiautomation::inputs::{Mouse, MouseButton};
 use uiautomation::patterns::{
-    UIExpandCollapsePattern, UIInvokePattern, UIScrollItemPattern, UIScrollPattern, UIValuePattern,
+    UIExpandCollapsePattern, UIInvokePattern, UIScrollItemPattern, UIScrollPattern,
+    UISelectionItemPattern, UITextPattern, UIValuePattern,
 };
 use uiautomation::screenshots::Screenshot;
 use uiautomation::types::{Point, Rect};
@@ -32,10 +33,10 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetForegroundWindow, GetSystemMetrics, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, SetForegroundWindow,
-    ShowWindow, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-    SW_RESTORE, SW_SHOWNORMAL,
+    EnumWindows, GetAncestor, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+    SetForegroundWindow, ShowWindow, GA_ROOTOWNER, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_RESTORE, SW_SHOWNORMAL,
 };
 
 const MAX_NODES: usize = 400;
@@ -45,6 +46,45 @@ const MAX_CHILDREN: usize = 64;
 struct CachedNode {
     element: UIElement,
     line: String,
+    focused: bool,
+    selected: bool,
+}
+
+/// One bounded screenshot. Coordinates for its id are physical pixels inside this
+/// region, whose screen origin may sit on any monitor. Sibling regions from the
+/// same capture share `generation`. A later capture of the same target replaces them.
+struct ShotRecord {
+    id: String,
+    hwnd: i64,
+    generation: u64,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+    anchor_left: i32,
+    anchor_top: i32,
+    anchor_right: i32,
+    anchor_bottom: i32,
+    virtual_left: i32,
+    virtual_top: i32,
+    virtual_width: i32,
+    virtual_height: i32,
+}
+
+#[derive(Clone)]
+struct Monitor {
+    device: String,
+    primary: bool,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+    work_left: i32,
+    work_top: i32,
+    work_right: i32,
+    work_bottom: i32,
+    dpi_x: u32,
+    dpi_y: u32,
 }
 
 pub struct Session {
@@ -52,6 +92,9 @@ pub struct Session {
     walker: UITreeWalker,
     cache_hwnd: isize,
     nodes: Vec<CachedNode>,
+    shots: Vec<ShotRecord>,
+    shot_seq: u64,
+    generation: u64,
 }
 
 impl Session {
@@ -68,6 +111,9 @@ impl Session {
             walker,
             cache_hwnd: 0,
             nodes: Vec::new(),
+            shots: Vec::new(),
+            shot_seq: 0,
+            generation: 0,
         })
     }
 
@@ -162,31 +208,22 @@ impl Session {
         scale: f32,
     ) -> Result<Value, String> {
         self.ensure_allowed(window_id)?;
-        let info = describe(window_id as isize)
-            .ok_or_else(|| format!("window {window_id} is not open"))?;
         if shot {
             self.guard_input(window_id)?;
             focus(window_id as isize)?;
             thread::sleep(Duration::from_millis(120));
         }
+        let info = describe(window_id as isize)
+            .ok_or_else(|| format!("window {window_id} is not open"))?;
         let mut result = json!({ "window": info.to_json(), "accessibility": null });
         if text {
             let tree = self.snapshot(window_id as isize)?;
-            result["accessibility"] = json!({ "tree": tree });
+            result["accessibility"] = accessibility_payload(&self.nodes, &tree);
         }
         if shot {
-            let rect = Rect::new(info.left, info.top, info.right, info.bottom);
-            let (png, effective, width, height) = capture_png(rect, scale)?;
-            result["screenshot"] = json!({
-                "png_base64": png,
-                "scale": effective,
-                "width": width,
-                "height": height,
-                "note": format!(
-                    "window pixel (px,py) -> screen ({left}+px/{scale:.3}, {top}+py/{scale:.3})",
-                    left = info.left, top = info.top, scale = effective
-                ),
-            });
+            let views = self.capture_window_views(&info, scale)?;
+            result["screenshot"] = views.0;
+            result["screenshots"] = views.1;
         }
         Ok(result)
     }
@@ -196,7 +233,8 @@ impl Session {
     pub fn screenshot(&mut self, params: &Value) -> Result<Value, String> {
         let (origin_x, origin_y, width, height) = virtual_screen();
         let scale = params.get("scale").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32;
-        let (left, top, right, bottom) = match params.get("region").and_then(|v| v.as_array()) {
+        self.generation = self.generation.saturating_add(1);
+        let requested = match params.get("region").and_then(|v| v.as_array()) {
             Some(region) if region.len() == 4 => {
                 let value = |index: usize| {
                     region[index]
@@ -210,30 +248,75 @@ impl Session {
                 if right <= left || bottom <= top {
                     return Err("region is empty after clamping to the screen".into());
                 }
-                (left, top, right, bottom)
+                Some((left, top, right, bottom))
             }
             Some(_) => return Err("region must be [left, top, right, bottom]".into()),
-            None => (origin_x, origin_y, origin_x + width, origin_y + height),
+            None => None,
         };
-        let (png, effective, out_w, out_h) =
-            capture_png(Rect::new(left, top, right, bottom), scale)?;
+        let (left, top, right, bottom) =
+            requested.unwrap_or((origin_x, origin_y, origin_x + width, origin_y + height));
+        let primary = self.capture_region(
+            0,
+            (left, top, right, bottom),
+            (left, top, right, bottom),
+            Rect::new(left, top, right, bottom),
+            scale,
+            "desktop",
+            None,
+            0,
+        )?;
+        // The combined virtual desktop stays screenshots[0] so its id matches the
+        // image the model sees. A second monitor is its own region; a single
+        // display that already equals the virtual screen is not captured twice.
+        let mut regions = vec![primary.clone()];
+        if requested.is_none() {
+            for monitor in monitors()? {
+                let overlap = (monitor.left, monitor.top, monitor.right, monitor.bottom);
+                if overlap == (left, top, right, bottom) {
+                    continue;
+                }
+                regions.push(self.capture_region(
+                    0,
+                    overlap,
+                    overlap,
+                    Rect::new(monitor.left, monitor.top, monitor.right, monitor.bottom),
+                    scale,
+                    "monitor",
+                    Some(monitor.device),
+                    0,
+                )?);
+            }
+        }
         Ok(json!({
             "screenshot": {
-                "png_base64": png,
-                "scale": effective,
-                "width": out_w,
-                "height": out_h,
+                "id": primary["id"],
+                "png_base64": primary["png_base64"],
+                "scale": primary["scale"],
+                "width": primary["width"],
+                "height": primary["height"],
                 "origin": [left, top],
                 "note": format!(
-                    "image pixel (px,py) -> screen ({left}+px/{scale:.3}, {top}+py/{scale:.3})",
-                    left = left, top = top, scale = effective
+                    "region pixel (px,py) -> screen ({left}+px, {top}+py). Image pixels are region pixels times scale {scale:.3}; divide image pixels by scale. screenshots[0] is this image. Later entries are other monitors; pass that entry's id as screenshotId and use pixels inside that region.",
+                    left = left, top = top, scale = primary["scale"].as_f64().unwrap_or(1.0)
                 ),
-            }
+            },
+            "screenshots": regions.iter().map(public_shot).collect::<Vec<_>>(),
         }))
     }
 
     pub fn click(&mut self, params: &Value) -> Result<Value, String> {
-        let (x, y, window_id) = self.resolve_point(params)?;
+        let hinted = params.get("window_id").and_then(|v| v.as_i64());
+        let frame = self.bound_frame(params, hinted)?;
+        let (x, y, window_id) = if params.get("element_index").and_then(|v| v.as_i64()).is_some_and(|index| index >= 0) {
+            let mut stash = None;
+            let params = params_with_window(params, frame.map(|item| item.0).filter(|hwnd| *hwnd != 0), &mut stash);
+            self.resolve_point(params)?
+        } else if let Some(frame) = frame {
+            let point = point_in_frame(int_key(params, &["x"])?, int_key(params, &["y"])?, frame)?;
+            (point.0, point.1, point.2)
+        } else {
+            self.resolve_point(params)?
+        };
         if let Some(id) = window_id {
             self.guard_input(id)?;
             focus(id as isize)?;
@@ -275,7 +358,16 @@ impl Session {
     }
 
     pub fn move_to(&mut self, params: &Value) -> Result<Value, String> {
-        let (x, y, window_id) = self.resolve_point(params)?;
+        let hinted = params.get("window_id").and_then(|v| v.as_i64());
+        let frame = self.bound_frame(params, hinted)?;
+        let (x, y, window_id) = if params.get("element_index").and_then(|v| v.as_i64()).is_some_and(|index| index >= 0) {
+            self.resolve_point(params)?
+        } else if let Some(frame) = frame {
+            let point = point_in_frame(int_key(params, &["x"])?, int_key(params, &["y"])?, frame)?;
+            (point.0, point.1, point.2)
+        } else {
+            self.resolve_point(params)?
+        };
         if let Some(id) = window_id {
             self.guard_input(id)?;
             focus(id as isize)?;
@@ -289,12 +381,29 @@ impl Session {
     }
 
     pub fn drag(&mut self, params: &Value) -> Result<Value, String> {
-        let window_id = params.get("window_id").and_then(|v| v.as_i64());
+        let hinted = params.get("window_id").and_then(|v| v.as_i64());
+        let frame = self.bound_frame(params, hinted)?;
         let x1 = int_key(params, &["x1", "from_x"])?;
         let y1 = int_key(params, &["y1", "from_y"])?;
         let x2 = int_key(params, &["x2", "to_x"])?;
         let y2 = int_key(params, &["y2", "to_y"])?;
-        let (start, end) = match window_id {
+        let (start, end) = if let Some(frame) = frame {
+            let start = point_in_frame(x1, y1, frame)?;
+            if frame.0 != 0 {
+                self.guard_input(frame.0)?;
+                focus(frame.0 as isize)?;
+            } else {
+                self.guard_point(start.0, start.1)?;
+            }
+            (
+                Point::new(start.0, start.1),
+                Point::new(
+                    frame.1.checked_add(x2).ok_or("drag x out of range")?,
+                    frame.2.checked_add(y2).ok_or("drag y out of range")?,
+                ),
+            )
+        } else {
+            match hinted {
             Some(id) => {
                 self.guard_input(id)?;
                 let info =
@@ -314,6 +423,7 @@ impl Session {
             None => {
                 self.guard_point(x1, y1)?;
                 (Point::new(x1, y1), Point::new(x2, y2))
+            }
             }
         };
         let dense = densify(
@@ -461,7 +571,14 @@ impl Session {
     }
 
     pub fn scroll(&mut self, params: &Value) -> Result<Value, String> {
-        let (x, y, window_id) = self.resolve_point(params)?;
+        let hinted = params.get("window_id").and_then(|v| v.as_i64());
+        let frame = self.bound_frame(params, hinted)?;
+        let (x, y, window_id) = if let Some(frame) = frame {
+            let point = point_in_frame(int_key(params, &["x"])?, int_key(params, &["y"])?, frame)?;
+            (point.0, point.1, point.2)
+        } else {
+            self.resolve_point(params)?
+        };
         if let Some(id) = window_id {
             self.guard_input(id)?;
             focus(id as isize)?;
@@ -823,6 +940,168 @@ impl Session {
             .ok_or_else(|| format!("window {window_id} is not open"))?;
         ensure_token(&info.app)
     }
+
+    /// `screenshotId` selects one bounded region from the latest capture. `x` and `y`
+    /// are physical pixels inside that region, so a monitor slice or owned popup
+    /// does not inherit the parent window's origin.
+    fn bound_frame(
+        &self,
+        params: &Value,
+        window_id: Option<i64>,
+    ) -> Result<Option<(i64, i32, i32, i32, i32)>, String> {
+        let Some(raw) = screenshot_id_param(params)? else {
+            return Ok(None);
+        };
+        let hwnd = check_shot(&self.shots, raw, window_id, None)?;
+        let shot = self
+            .shots
+            .iter()
+            .rev()
+            .find(|shot| shot.id == raw.trim())
+            .ok_or_else(|| format!("screenshotId {} is not cached; call get_window_state again", raw.trim()))?;
+        if hwnd != 0 {
+            let info = describe(hwnd as isize).ok_or_else(|| format!("window {hwnd} is not open"))?;
+            check_shot(
+                &self.shots,
+                raw,
+                Some(hwnd),
+                Some((info.left, info.top, info.right, info.bottom)),
+            )?;
+        } else {
+            let (left, top, width, height) = virtual_screen();
+            if shot.virtual_left != left
+                || shot.virtual_top != top
+                || shot.virtual_width != width
+                || shot.virtual_height != height
+            {
+                return Err(
+                    "display layout changed since screenshotId was captured; take a new screenshot"
+                        .into(),
+                );
+            }
+        }
+        Ok(Some((hwnd, shot.left, shot.top, shot.right, shot.bottom)))
+    }
+
+    fn capture_window_views(
+        &mut self,
+        info: &WindowInfo,
+        scale: f32,
+    ) -> Result<(Value, Value), String> {
+        self.generation = self.generation.saturating_add(1);
+        let anchor = (info.left, info.top, info.right, info.bottom);
+        let mut shots = vec![self.capture_region(
+            info.hwnd as i64,
+            anchor,
+            anchor,
+            Rect::new(info.left, info.top, info.right, info.bottom),
+            scale,
+            "window",
+            None,
+            0,
+        )?];
+        if let Ok(list) = monitors() {
+            for (monitor, overlap) in spanning_slices(anchor, &list) {
+                shots.push(self.capture_region(
+                    info.hwnd as i64,
+                    overlap,
+                    anchor,
+                    Rect::new(overlap.0, overlap.1, overlap.2, overlap.3),
+                    scale,
+                    "monitor",
+                    Some(monitor.device),
+                    0,
+                )?);
+            }
+        }
+        for (index, hwnd) in transient_windows(info.hwnd).into_iter().enumerate() {
+            let Some(popup) = describe(hwnd) else { continue };
+            if popup.pid == std::process::id() || popup.pid != info.pid {
+                continue;
+            }
+            let rect = (popup.left, popup.top, popup.right, popup.bottom);
+            if rect.2 <= rect.0 || rect.3 <= rect.1 {
+                continue;
+            }
+            shots.push(self.capture_region(
+                popup.hwnd as i64,
+                rect,
+                rect,
+                Rect::new(popup.left, popup.top, popup.right, popup.bottom),
+                scale,
+                "transient",
+                None,
+                10 + index as i32,
+            )?);
+        }
+        let primary = &shots[0];
+        let legacy = json!({
+            "id": primary["id"],
+            "png_base64": primary["png_base64"],
+            "scale": primary["scale"],
+            "width": primary["width"],
+            "height": primary["height"],
+            "note": format!(
+                "region pixel (px,py) -> screen ({left}+px, {top}+py). Image pixels are region pixels times scale {scale:.3}; divide image pixels by scale before clicking. screenshotId binds one region and does not convert image pixels. Extra screenshots are per-monitor slices and owned popups.",
+                left = info.left,
+                top = info.top,
+                scale = primary["scale"].as_f64().unwrap_or(1.0)
+            ),
+        });
+        Ok((legacy, Value::Array(shots.iter().map(public_shot).collect())))
+    }
+
+    fn capture_region(
+        &mut self,
+        hwnd: i64,
+        region: (i32, i32, i32, i32),
+        anchor: (i32, i32, i32, i32),
+        rect: Rect,
+        scale: f32,
+        role: &str,
+        monitor: Option<String>,
+        z_index: i32,
+    ) -> Result<Value, String> {
+        let (png, effective, width, height) = capture_png(rect, scale)?;
+        self.shot_seq = self.shot_seq.saturating_add(1);
+        let id = format!("ph-{}", self.shot_seq);
+        let (virtual_left, virtual_top, virtual_width, virtual_height) = virtual_screen();
+        self.shots.push(ShotRecord {
+            id: id.clone(),
+            hwnd,
+            generation: self.generation,
+            left: region.0,
+            top: region.1,
+            right: region.2,
+            bottom: region.3,
+            anchor_left: anchor.0,
+            anchor_top: anchor.1,
+            anchor_right: anchor.2,
+            anchor_bottom: anchor.3,
+            virtual_left,
+            virtual_top,
+            virtual_width,
+            virtual_height,
+        });
+        if self.shots.len() > 32 {
+            let extra = self.shots.len() - 32;
+            self.shots.drain(0..extra);
+        }
+        Ok(json!({
+            "id": id,
+            "png_base64": png,
+            "scale": effective,
+            "width": width,
+            "height": height,
+            "originX": region.0,
+            "originY": region.1,
+            "zIndex": z_index,
+            "role": role,
+            "monitor": monitor,
+            "windowWidth": region.2.saturating_sub(region.0),
+            "windowHeight": region.3.saturating_sub(region.1),
+        }))
+    }
 }
 
 struct WindowInfo {
@@ -845,6 +1124,7 @@ impl WindowInfo {
             "app": self.app,
             "rect": [self.left, self.top, self.right, self.bottom],
             "dpi": unsafe { GetDpiForWindow(HWND(self.hwnd as *mut std::ffi::c_void)) },
+            "monitors": monitors_touching(self.left, self.top, self.right, self.bottom),
         })
     }
 }
@@ -1459,10 +1739,12 @@ fn walk(
         return Ok(());
     }
     let index = nodes.len();
-    let line = format_node(element, index, depth);
+    let (line, focused, selected) = format_node(element, index, depth);
     nodes.push(CachedNode {
         element: element.clone(),
         line,
+        focused,
+        selected,
     });
     let mut child = walker.get_first_child(element).ok();
     let mut children = 0;
@@ -1478,7 +1760,7 @@ fn walk(
     Ok(())
 }
 
-fn format_node(element: &UIElement, index: usize, depth: usize) -> String {
+fn format_node(element: &UIElement, index: usize, depth: usize) -> (String, bool, bool) {
     let role = element
         .get_control_type()
         .map(|kind| format!("{kind:?}"))
@@ -1500,8 +1782,17 @@ fn format_node(element: &UIElement, index: usize, depth: usize) -> String {
         }
         bits.push("editable".into());
     }
-    if element.has_keyboard_focus().unwrap_or(false) {
+    let focused = element.has_keyboard_focus().unwrap_or(false);
+    if focused {
         bits.push("focused".into());
+    }
+    let selected = element
+        .get_pattern::<UISelectionItemPattern>()
+        .ok()
+        .and_then(|pattern| pattern.is_selected().ok())
+        .unwrap_or(false);
+    if selected {
+        bits.push("selected".into());
     }
     if element.is_offscreen().unwrap_or(false) {
         bits.push("offscreen".into());
@@ -1509,7 +1800,233 @@ fn format_node(element: &UIElement, index: usize, depth: usize) -> String {
     if !element.is_enabled().unwrap_or(true) {
         bits.push("disabled".into());
     }
-    format!("{:indent$}{}", "", bits.join(" "), indent = depth * 2)
+    (
+        format!("{:indent$}{}", "", bits.join(" "), indent = depth * 2),
+        focused,
+        selected,
+    )
+}
+
+fn accessibility_payload(nodes: &[CachedNode], tree: &str) -> Value {
+    let mut value = json!({ "tree": tree });
+    if let Some(node) = nodes.iter().find(|node| node.focused) {
+        value["focused_element"] = json!(node.line);
+    }
+    let selected: Vec<&str> = nodes
+        .iter()
+        .filter(|node| node.selected)
+        .take(20)
+        .map(|node| node.line.as_str())
+        .collect();
+    if !selected.is_empty() {
+        value["selected_elements"] = json!(selected);
+    }
+    let (document, selection) = text_snapshot(nodes);
+    if let Some(text) = document {
+        value["document_text"] = json!(text);
+    }
+    if let Some(text) = selection {
+        value["selected_text"] = json!(text);
+    }
+    value
+}
+
+fn text_snapshot(nodes: &[CachedNode]) -> (Option<String>, Option<String>) {
+    let mut order = Vec::new();
+    for (index, node) in nodes.iter().enumerate() {
+        if node.focused {
+            order.push(index);
+        }
+    }
+    if !nodes.is_empty() {
+        order.push(0);
+    }
+    for index in 0..nodes.len().min(12) {
+        order.push(index);
+    }
+    order.sort_unstable();
+    order.dedup();
+    let mut document = None;
+    let mut selected = None;
+    for index in order {
+        let Ok(pattern) = nodes[index].element.get_pattern::<UITextPattern>() else {
+            continue;
+        };
+        if document.is_none() {
+            if let Ok(range) = pattern.get_document_range() {
+                if let Ok(text) = range.get_text(8_000) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        document = Some(clip_text(trimmed, 8_000));
+                    }
+                }
+            }
+        }
+        if selected.is_none() {
+            if let Ok(ranges) = pattern.get_selection() {
+                let mut parts = Vec::new();
+                for range in ranges.iter().take(8) {
+                    if let Ok(text) = range.get_text(2_000) {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            parts.push(clip_text(trimmed, 2_000));
+                        }
+                    }
+                }
+                if !parts.is_empty() {
+                    selected = Some(parts.join("\n"));
+                }
+            }
+        }
+    }
+    (document, selected)
+}
+
+fn clip_text(text: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for (index, ch) in text.chars().enumerate() {
+        if index >= max_chars {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn screenshot_id_param(params: &Value) -> Result<Option<&str>, String> {
+    match params
+        .get("screenshotId")
+        .or_else(|| params.get("screenshot_id"))
+    {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.as_str())),
+        Some(_) => Err("screenshotId must be a non-empty string".into()),
+    }
+}
+
+fn check_shot(
+    shots: &[ShotRecord],
+    id: &str,
+    window_id: Option<i64>,
+    live: Option<(i32, i32, i32, i32)>,
+) -> Result<i64, String> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err("screenshotId must be a non-empty string".into());
+    }
+    let shot = shots.iter().rev().find(|shot| shot.id == id).ok_or_else(|| {
+        format!("screenshotId {id} is not cached; call get_window_state again")
+    })?;
+    if let Some(window_id) = window_id {
+        if window_id != shot.hwnd {
+            return Err("screenshotId belongs to a different window".into());
+        }
+    }
+    if shots
+        .iter()
+        .any(|item| item.hwnd == shot.hwnd && item.generation > shot.generation)
+    {
+        return Err("screenshotId is stale; call get_window_state again".into());
+    }
+    if let Some((left, top, right, bottom)) = live {
+        if shot.anchor_left != left
+            || shot.anchor_top != top
+            || shot.anchor_right != right
+            || shot.anchor_bottom != bottom
+        {
+            return Err(
+                "window moved since screenshotId was captured; call get_window_state again".into(),
+            );
+        }
+    }
+    Ok(shot.hwnd)
+}
+
+fn point_in_frame(
+    x: i32,
+    y: i32,
+    frame: (i64, i32, i32, i32, i32),
+) -> Result<(i32, i32, Option<i64>), String> {
+    let (hwnd, left, top, right, bottom) = frame;
+    let width = right.saturating_sub(left);
+    let height = bottom.saturating_sub(top);
+    if x < 0 || y < 0 || x >= width || y >= height {
+        return Err("point leaves the screenshot region".into());
+    }
+    Ok((
+        left.checked_add(x).ok_or("point x out of range")?,
+        top.checked_add(y).ok_or("point y out of range")?,
+        if hwnd == 0 { None } else { Some(hwnd) },
+    ))
+}
+
+fn public_shot(shot: &Value) -> Value {
+    let png = shot.get("png_base64").and_then(|v| v.as_str()).unwrap_or("");
+    json!({
+        "id": shot["id"],
+        "url": format!("data:image/png;base64,{png}"),
+        "width": shot["width"],
+        "height": shot["height"],
+        "originX": shot["originX"],
+        "originY": shot["originY"],
+        "zIndex": shot["zIndex"],
+        "scale": shot["scale"],
+        "role": shot["role"],
+        "monitor": shot["monitor"],
+        "windowWidth": shot["windowWidth"],
+        "windowHeight": shot["windowHeight"],
+    })
+}
+
+fn intersection(
+    window: (i32, i32, i32, i32),
+    monitor: (i32, i32, i32, i32),
+) -> Option<(i32, i32, i32, i32)> {
+    let left = window.0.max(monitor.0);
+    let top = window.1.max(monitor.1);
+    let right = window.2.min(monitor.2);
+    let bottom = window.3.min(monitor.3);
+    if right > left && bottom > top {
+        Some((left, top, right, bottom))
+    } else {
+        None
+    }
+}
+
+fn spanning_slices(
+    window: (i32, i32, i32, i32),
+    monitors: &[Monitor],
+) -> Vec<(Monitor, (i32, i32, i32, i32))> {
+    let hits: Vec<_> = monitors
+        .iter()
+        .filter_map(|monitor| {
+            intersection(window, (monitor.left, monitor.top, monitor.right, monitor.bottom))
+                .map(|overlap| (monitor.clone(), overlap))
+        })
+        .collect();
+    if hits.len() < 2 {
+        Vec::new()
+    } else {
+        hits
+    }
+}
+
+fn params_with_window<'a>(
+    params: &'a Value,
+    window_id: Option<i64>,
+    stash: &'a mut Option<Value>,
+) -> &'a Value {
+    let Some(window_id) = window_id else {
+        return params;
+    };
+    if params.get("window_id").and_then(|v| v.as_i64()).is_some() {
+        return params;
+    }
+    let mut copy = params.clone();
+    copy["window_id"] = json!(window_id);
+    *stash = Some(copy);
+    stash.as_ref().unwrap()
 }
 
 fn capture_png(rect: Rect, scale: f32) -> Result<(String, f32, u32, u32), String> {
@@ -1696,6 +2213,124 @@ mod policy_tests {
     }
 
     #[test]
+    fn screenshot_id_accepts_the_latest_shot_for_that_window() {
+        let shots = vec![
+            shot("ph-1", 7, 10, 1),
+            shot("ph-2", 8, 40, 1),
+            shot("ph-3", 7, 10, 2),
+        ];
+        assert_eq!(
+            super::check_shot(&shots, " ph-3 ", Some(7), Some((10, 0, 110, 50))).unwrap(),
+            7
+        );
+        assert_eq!(super::check_shot(&shots, "ph-2", None, None).unwrap(), 8);
+    }
+
+    #[test]
+    fn screenshot_id_rejects_unknown_stale_foreign_and_moved() {
+        let shots = vec![shot("ph-1", 7, 10, 1), shot("ph-2", 7, 12, 2)];
+        assert!(super::check_shot(&shots, "missing", None, None)
+            .unwrap_err()
+            .contains("not cached"));
+        assert!(super::check_shot(&shots, "ph-1", Some(7), None)
+            .unwrap_err()
+            .contains("stale"));
+        assert!(super::check_shot(&shots, "ph-2", Some(9), None)
+            .unwrap_err()
+            .contains("different"));
+        assert!(super::check_shot(&shots, "ph-2", Some(7), Some((10, 0, 110, 50)))
+            .unwrap_err()
+            .contains("moved"));
+        assert!(super::check_shot(&shots, "  ", None, None).is_err());
+        assert!(super::screenshot_id_param(&serde_json::json!({"screenshotId": 4})).is_err());
+    }
+
+    fn shot(id: &str, hwnd: i64, left: i32, generation: u64) -> super::ShotRecord {
+        super::ShotRecord {
+            id: id.into(),
+            hwnd,
+            generation,
+            left,
+            top: 0,
+            right: left + 100,
+            bottom: 50,
+            anchor_left: left,
+            anchor_top: 0,
+            anchor_right: left + 100,
+            anchor_bottom: 50,
+            virtual_left: 0,
+            virtual_top: 0,
+            virtual_width: 1920,
+            virtual_height: 1080,
+        }
+    }
+
+    #[test]
+    fn sibling_regions_stay_valid_until_the_next_capture() {
+        let mut full = shot("ph-1", 7, 10, 2);
+        full.right = 140;
+        full.anchor_right = 140;
+        let mut slice = shot("ph-2", 7, 100, 2);
+        slice.left = 100;
+        slice.top = 0;
+        slice.right = 140;
+        slice.bottom = 50;
+        slice.anchor_left = 10;
+        slice.anchor_right = 140;
+        let shots = vec![full, slice];
+        assert_eq!(
+            super::point_in_frame(10, 20, (0, -1920, 0, -1000, 1080)).unwrap(),
+            (-1910, 20, None)
+        );
+        assert_eq!(
+            super::check_shot(&shots, "ph-1", Some(7), Some((10, 0, 140, 50))).unwrap(),
+            7
+        );
+        assert!(super::check_shot(&shots, "ph-2", Some(7), Some((10, 0, 140, 50))).is_ok());
+        let replaced = vec![shot("ph-1", 7, 10, 2), shot("ph-4", 7, 10, 4)];
+        assert!(super::check_shot(&replaced, "ph-1", Some(7), None)
+            .unwrap_err()
+            .contains("stale"));
+    }
+
+    #[test]
+    fn a_window_on_two_monitors_splits_into_both_regions() {
+        let monitors = vec![
+            monitor_at("left", false, -1920, 0, 0, 1080),
+            monitor_at("right", true, 0, 0, 1920, 1080),
+        ];
+        let slices = super::spanning_slices((-100, 40, 80, 200), &monitors);
+        assert_eq!(slices.len(), 2);
+        assert_eq!(slices[0].1, (-100, 40, 0, 200));
+        assert_eq!(slices[1].1, (0, 40, 80, 200));
+        assert!(super::spanning_slices((10, 10, 20, 20), &monitors).is_empty());
+    }
+
+    fn monitor_at(
+        device: &str,
+        primary: bool,
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    ) -> super::Monitor {
+        super::Monitor {
+            device: device.into(),
+            primary,
+            left,
+            top,
+            right,
+            bottom,
+            work_left: left,
+            work_top: top,
+            work_right: right,
+            work_bottom: bottom,
+            dpi_x: 96,
+            dpi_y: 96,
+        }
+    }
+
+    #[test]
     fn allow_list_matches_path_name_or_stem() {
         assert!(app_allowed(r"C:\Windows\notepad.exe", ""));
         let allow = r"C:\Windows\System32\notepad.exe, calc, notepad.exe";
@@ -1799,26 +2434,107 @@ fn instant_motion(params: &Value) -> Result<bool, String> {
 }
 
 pub fn system_info() -> Result<Value, String> {
-    let mut monitors = Vec::<Value>::new();
+    let monitors = monitors()?;
+    let (left, top, width, height) = virtual_screen();
+    Ok(json!({
+        "platform": "windows",
+        "arch": std::env::consts::ARCH,
+        "coordinate_space": "physical_pixels",
+        "monitors": monitors.iter().map(monitor_json).collect::<Vec<_>>(),
+        "virtual_screen": { "left": left, "top": top, "width": width, "height": height }
+    }))
+}
+
+fn monitors() -> Result<Vec<Monitor>, String> {
+    let mut found = Vec::new();
     unsafe {
         if !EnumDisplayMonitors(
             None,
             None,
             Some(enum_monitor),
-            LPARAM(&mut monitors as *mut Vec<Value> as isize),
+            LPARAM(&mut found as *mut Vec<Monitor> as isize),
         )
         .as_bool()
         {
             return Err("cannot enumerate display monitors".into());
         }
-        Ok(json!({"platform":"windows", "arch":std::env::consts::ARCH,
-        "coordinate_space":"physical_pixels", "monitors":monitors, "virtual_screen":{
-            "left":GetSystemMetrics(SM_XVIRTUALSCREEN),
-            "top":GetSystemMetrics(SM_YVIRTUALSCREEN),
-            "width":GetSystemMetrics(SM_CXVIRTUALSCREEN),
-            "height":GetSystemMetrics(SM_CYVIRTUALSCREEN)
-        }}))
     }
+    Ok(found)
+}
+
+fn monitor_json(monitor: &Monitor) -> Value {
+    let dpi = if monitor.dpi_x == 0 {
+        Value::Null
+    } else {
+        json!({
+            "x": monitor.dpi_x,
+            "y": monitor.dpi_y,
+            "scale_percent": f64::from(monitor.dpi_x) * 100.0 / 96.0
+        })
+    };
+    json!({
+        "device": monitor.device,
+        "primary": monitor.primary,
+        "rect": [monitor.left, monitor.top, monitor.right, monitor.bottom],
+        "work_rect": [monitor.work_left, monitor.work_top, monitor.work_right, monitor.work_bottom],
+        "dpi": dpi,
+    })
+}
+
+fn monitors_touching(left: i32, top: i32, right: i32, bottom: i32) -> Value {
+    let Ok(list) = monitors() else {
+        return Value::Array(Vec::new());
+    };
+    Value::Array(
+        list.iter()
+            .filter_map(|monitor| {
+                let overlap = intersection(
+                    (left, top, right, bottom),
+                    (monitor.left, monitor.top, monitor.right, monitor.bottom),
+                )?;
+                let mut row = monitor_json(monitor);
+                if let Some(map) = row.as_object_mut() {
+                    map.insert("overlap".into(), json!([overlap.0, overlap.1, overlap.2, overlap.3]));
+                }
+                Some(row)
+            })
+            .collect(),
+    )
+}
+
+struct TransientSearch {
+    root: isize,
+    found: Vec<isize>,
+}
+
+fn transient_windows(root: isize) -> Vec<isize> {
+    let mut search = TransientSearch {
+        root,
+        found: Vec::new(),
+    };
+    unsafe {
+        let _ = EnumWindows(
+            Some(enum_transient),
+            LPARAM(&mut search as *mut TransientSearch as isize),
+        );
+    }
+    search.found
+}
+
+unsafe extern "system" fn enum_transient(hwnd: HWND, data: LPARAM) -> BOOL {
+    let search = &mut *(data.0 as *mut TransientSearch);
+    if search.found.len() >= 4 || hwnd.0 as isize == search.root {
+        return BOOL(1);
+    }
+    if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+        return BOOL(1);
+    }
+    let owner = GetAncestor(hwnd, GA_ROOTOWNER);
+    if owner.0.is_null() || owner.0 as isize != search.root {
+        return BOOL(1);
+    }
+    search.found.push(hwnd.0 as isize);
+    BOOL(1)
 }
 
 unsafe extern "system" fn enum_monitor(
@@ -1832,17 +2548,29 @@ unsafe extern "system" fn enum_monitor(
     if !GetMonitorInfoW(monitor, &mut info.monitorInfo).as_bool() {
         return BOOL(1);
     }
-    let (mut x, mut y) = (0, 0);
-    let dpi = if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut x, &mut y).is_ok() {
-        json!({"x":x,"y":y,"scale_percent":f64::from(x)*100.0/96.0})
+    let (mut x, mut y) = (0u32, 0u32);
+    let (dpi_x, dpi_y) = if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut x, &mut y).is_ok() {
+        (x, y)
     } else {
-        Value::Null
+        (0, 0)
     };
     let r = info.monitorInfo.rcMonitor;
     let w = info.monitorInfo.rcWork;
-    let monitors = &mut *(data.0 as *mut Vec<Value>);
-    monitors.push(json!({"device":u16_string(&info.szDevice),"primary":info.monitorInfo.dwFlags & 1 != 0,
-        "rect":[r.left,r.top,r.right,r.bottom],"work_rect":[w.left,w.top,w.right,w.bottom],"dpi":dpi}));
+    let monitors = &mut *(data.0 as *mut Vec<Monitor>);
+    monitors.push(Monitor {
+        device: u16_string(&info.szDevice),
+        primary: info.monitorInfo.dwFlags & 1 != 0,
+        left: r.left,
+        top: r.top,
+        right: r.right,
+        bottom: r.bottom,
+        work_left: w.left,
+        work_top: w.top,
+        work_right: w.right,
+        work_bottom: w.bottom,
+        dpi_x,
+        dpi_y,
+    });
     BOOL(1)
 }
 

@@ -37,10 +37,24 @@ See [release changes](../CHANGELOG.md); the existing Alpha 1 ZIP has 25 tools.
 zigzag with the left button held (pick a pen in the app first). `screenshot`
 captures the whole desktop or a `[left, top, right, bottom]` region.
 
-`get_window_state` can include a PNG and an accessibility tree. Click an
-`element_index` from that tree, or a point. With `window_id`, `x` and `y` are
-window pixels. Divide image pixels by `screenshot.scale`. Positive `scrollY`
-moves the page down.
+`get_window_state` can include a PNG and an accessibility object. The object
+always has `tree` when text was requested, and adds `focused_element`,
+`selected_elements`, `document_text`, or `selected_text` when UI Automation
+exposes them. Click an `element_index` from that tree, or a point. With
+`window_id`, `x` and `y` are window pixels. Divide image pixels by
+`screenshot.scale`. Each captured region returns `screenshot.id` and a
+`screenshots` entry with that id, image size, screen origin, `zIndex`, `role`,
+and `scale`. A window on one monitor has one region. A window that crosses
+monitors adds one `monitor` region per intersection, using that intersection's
+origin. Owned popups, including a menu on another monitor, are `transient`
+regions. `screenshot` without a region returns one image per monitor in
+addition to the combined desktop image. Pass the region's id as `screenshotId`
+to `click`, `drag`, `scroll`, or `move`. `x` and `y` are physical pixels inside
+that region. The id must come from the latest capture of that window or desktop,
+and the window must still have the captured size and position. A desktop id
+also requires the virtual screen to be unchanged. The id does not turn image
+pixels into region pixels. Positive `scrollY` moves the page down. Window
+records include a `monitors` array with each touched display and the overlap.
 
 `batch` runs up to 50 actions and stops at the first error. The Rust host
 accepts `click`, `double_click`, `right_click`, `move`, `drag`, `draw`, `scroll`,
@@ -55,9 +69,11 @@ anything irreversible without watching it.
 
 Input waits until the keyboard and mouse have been idle for a short moment.
 If that does not happen within about five seconds the call returns `user_active`
-and does nothing. `POINTHAND_ALLOW` is a comma-separated list of paths, exe
-names, or names without an extension (`notepad.exe` also allows `notepad`).
-An empty list allows every app. Physical Escape stops mutations until the MCP server restarts.
+and does nothing. After the action starts, moving or clicking the mouse does
+not cancel it. Physical Escape stops the active stroke and later mutations
+until the MCP server restarts. `POINTHAND_ALLOW` is a comma-separated list of
+paths, exe names, or names without an extension (`notepad.exe` also allows
+`notepad`). An empty list allows every app.
 
 Windows blocks synthetic input into elevated windows. PointHand reports that
 as an error.
@@ -94,5 +110,9 @@ as well as `window_id`; `get_window` also accepts `id`.
 `click` accepts `mouse_button` and `click_count`. Conflicting window IDs fail.
 Indexed actions must target the window of the latest UIA snapshot.
 Value and secondary actions now honor the idle guard and allow-list.
-This is parameter compatibility with window2, not the complete sky protocol:
-screenshots retain PointHand PNG/scale output; screenshotId is not supported.
+Window actions accept the window2 `screenshotId` contract. PointHand still
+returns the PNG/scale object beside the `screenshots` array. `width` and
+`height` on that array are image pixels, not a second coordinate system.
+`lastUsedDate` and `useCount` are omitted; Windows does not supply them here.
+Shots show the visible desktop at the window rectangle. Occluded pixels are
+whatever is in front, not a private render of the hidden window.
