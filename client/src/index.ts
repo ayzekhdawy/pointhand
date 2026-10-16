@@ -131,7 +131,9 @@ server.registerTool(
   "get_window_state",
   {
     description:
-      "Foreground the window, then return its rectangle, the monitors it touches, optional accessibility fields, and optional PNGs. " +
+      "Return the window rectangle, the monitors it touches, optional accessibility fields, and optional PNGs. " +
+      "A window screenshot uses that window's own pixels when Windows can capture it, including when another window covers it, and does not pull the window forward. " +
+      "capture is \"window\" or \"visible\". visible means graphics capture was unavailable, so the image is the desktop and the window may be raised. " +
       "A window that crosses monitors also returns one screenshot per monitor intersection. Owned popups are separate regions. " +
       "Pass a region's screenshotId to click, drag, scroll, or move. x and y are physical pixels inside that region, not image pixels: divide image pixels by scale. " +
       "The id must belong to the latest capture, and the window or popup must still be where it was captured.",
@@ -148,7 +150,7 @@ server.registerTool(
 server.registerTool(
   "click",
   {
-    description: "Click an accessibility element, a point inside a window, or a screen point. button is left, right, or middle. screenshotId selects a window, monitor slice, owned popup, or monitor screenshot. x and y are physical pixels inside that region.",
+    description: "Click an accessibility element, a point inside a window, or a screen point. button is left, right, or middle. screenshotId selects a window, monitor slice, owned popup, or monitor screenshot. x and y are physical pixels inside that region. A pointer action brings the target window forward and stops if a different window still covers the point.",
     inputSchema: {
       ...point,
       button: z.enum(["left", "right", "middle"]).optional(),

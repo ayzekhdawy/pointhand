@@ -2,9 +2,14 @@
 
 ## Unreleased
 
+## v0.2.0-alpha.3
+
+- Capture a covered window from its own pixels when Windows graphics capture is available. The shot is labeled `capture: window` and does not raise the window. Pointer actions bring that window forward and refuse a point that stays covered. If window capture is unavailable, the shot is labeled `capture: visible` and may raise the window.
 - Bind `click`, `drag`, and `scroll` to the latest per-window `screenshotId`, and return screenshot id, origin, and accessibility text fields beside the existing PNG/scale result.
 - A started action continues when the mouse moves or clicks. Physical Escape and `emergency_stop` still cancel it. A new action still waits until the pointer has been idle.
 - Multi-monitor actions use bounded regions. A window that crosses displays, each monitor screenshot, and an owned popup has its own `screenshotId` and screen origin. `list_windows` reports the monitors a window touches.
+
+These changes are included in Alpha 3. The existing v0.2.0-alpha.2 download remains unchanged.
 
 ## v0.2.0-alpha.2
 

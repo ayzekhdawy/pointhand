@@ -2,7 +2,7 @@
 
 [← Back to PointHand](../README.md)
 
-Implementation details and API conventions for Alpha 2. See the [changelog](../CHANGELOG.md) for differences from the Alpha 1 download.
+Implementation details and API conventions for the current alpha. See the [changelog](../CHANGELOG.md) for differences from the Alpha 2 download.
 
 ## Layout
 | Piece | Role |
@@ -18,9 +18,13 @@ One JSON object per line. A request is `{"id","method","params"}`. A response is
 Input requests are bounded to 4 MiB; oversized or invalid UTF-8 lines are drained
 and rejected without breaking the next request.
 
-Screenshots are the visible desktop at the window rectangle. Pixels hidden
-behind another window are whatever is in front. `activate_window` brings the
-target forward before a shot.
+A window screenshot uses that window's own pixels when Windows graphics capture
+is available, including while another window covers it. That capture does not
+bring the window forward. Each region is labeled `capture: "window"` or
+`capture: "visible"`. The visible label means graphics capture was unavailable,
+so the image is the desktop composite and the window may be raised. Desktop and
+monitor screenshots stay the visible composite. Pointer actions bring the target
+window forward and refuse a point that a different window still covers.
 
 ## What the agent can call
 `list_apps`, `list_windows`, `get_window`, `launch_app`, `activate_window`,
@@ -114,5 +118,7 @@ Window actions accept the window2 `screenshotId` contract. PointHand still
 returns the PNG/scale object beside the `screenshots` array. `width` and
 `height` on that array are image pixels, not a second coordinate system.
 `lastUsedDate` and `useCount` are omitted; Windows does not supply them here.
-Shots show the visible desktop at the window rectangle. Occluded pixels are
-whatever is in front, not a private render of the hidden window.
+A window image is that window's own pixels when graphics capture works, so a
+covered window is not photographed as the window in front of it. `capture` is
+`window` or `visible`. Pointer actions raise the target and stop if another
+window remains on top of the point. Desktop screenshots stay the visible composite.

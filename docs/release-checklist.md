@@ -17,6 +17,7 @@ The README release badge is `assets/release.svg`. It is served from this reposit
 - [ ] Additional physical-monitor combinations and display disconnection during input.
 - [x] MCP emergency stop during a real held-button stroke: 67–141 ms observed locally, button released, queued input blocked.
 - [x] Fail-closed monitor-loss policy tests; periodic desktop checks during input. Mouse movement does not cancel a started action.
+- [x] One-display covered-window capture: the back probe window kept its own color and stayed behind the front window. Pointer refusal while another window remains on top is unit-tested. A second physical monitor was not part of this capture check.
 - [x] Earlier Alpha 2 run: physical mouse movement during a held-button drawing returned `user_active` and released the button. Current builds keep drawing until Escape or `emergency_stop`.
 - [ ] Secure-desktop switching during a long drawing.
 - [x] Portable directory startup without source-tree dependencies.

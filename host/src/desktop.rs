@@ -1,12 +1,11 @@
 //! Desktop operations: windows, input, screenshots, and the accessibility tree.
 //!
-//! Screenshots are of the visible desktop at the window rectangle. Covered
-//! windows show whatever is in front of them; `activate_window` brings the
-//! target forward first when a shot is requested.
+//! A window screenshot uses that window's own pixels when Windows graphics
+//! capture is available, including while another window covers it. Pointer
+//! actions then bring that window forward and refuse a point that stays covered.
 
 use std::fs;
 use std::path::PathBuf;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -61,6 +60,8 @@ struct RegionCapture {
     role: &'static str,
     monitor: Option<String>,
     z_index: i32,
+    /// `window` when the pixels come from the window itself, otherwise `visible`.
+    capture: &'static str,
 }
 
 /// One bounded screenshot. Coordinates for its id are physical pixels inside this
@@ -223,8 +224,6 @@ impl Session {
         self.ensure_allowed(window_id)?;
         if shot {
             self.guard_input(window_id)?;
-            focus(window_id as isize)?;
-            thread::sleep(Duration::from_millis(120));
         }
         let info = describe(window_id as isize)
             .ok_or_else(|| format!("window {window_id} is not open"))?;
@@ -276,6 +275,7 @@ impl Session {
             role: "desktop",
             monitor: None,
             z_index: 0,
+            capture: "visible",
         })?;
         // The combined virtual desktop stays screenshots[0] so its id matches the
         // image the model sees. A second monitor is its own region; a single
@@ -295,6 +295,7 @@ impl Session {
                     role: "monitor",
                     monitor: Some(monitor.device),
                     z_index: 0,
+                    capture: "visible",
                 })?);
             }
         }
@@ -338,7 +339,7 @@ impl Session {
         };
         if let Some(id) = window_id {
             self.guard_input(id)?;
-            focus(id as isize)?;
+            prepare_target(id as isize, x, y)?;
         } else {
             self.guard_point(x, y)?;
         }
@@ -393,7 +394,7 @@ impl Session {
         };
         if let Some(id) = window_id {
             self.guard_input(id)?;
-            focus(id as isize)?;
+            prepare_target(id as isize, x, y)?;
         } else {
             self.guard_point(x, y)?;
         }
@@ -414,7 +415,7 @@ impl Session {
             let start = point_in_frame(x1, y1, frame)?;
             if frame.0 != 0 {
                 self.guard_input(frame.0)?;
-                focus(frame.0 as isize)?;
+                prepare_target(frame.0 as isize, start.0, start.1)?;
             } else {
                 self.guard_point(start.0, start.1)?;
             }
@@ -431,7 +432,11 @@ impl Session {
                     self.guard_input(id)?;
                     let info =
                         describe(id as isize).ok_or_else(|| format!("window {id} is not open"))?;
-                    focus(id as isize)?;
+                    prepare_target(
+                        id as isize,
+                        info.left.saturating_add(x1),
+                        info.top.saturating_add(y1),
+                    )?;
                     (
                         Point::new(
                             info.left.checked_add(x1).ok_or("drag x out of range")?,
@@ -492,7 +497,11 @@ impl Session {
         if let Some(id) = window_id {
             self.guard_input(id)?;
             let info = describe(id as isize).ok_or_else(|| format!("window {id} is not open"))?;
-            focus(id as isize)?;
+            prepare_target(
+                id as isize,
+                info.left.saturating_add(points[0].0),
+                info.top.saturating_add(points[0].1),
+            )?;
             for point in &mut points {
                 point.0 = point
                     .0
@@ -570,7 +579,7 @@ impl Session {
             .unwrap_or(0)
             .clamp(0, 200) as i32;
         self.guard_input(id)?;
-        focus(id as isize)?;
+        prepare_target(id as isize, lines[0][0].0, lines[0][0].1)?;
         let start = Instant::now();
         STROKE_HOLD_MS.store(hold_ms, std::sync::atomic::Ordering::Relaxed);
         let outcome = (|| -> Result<(), String> {
@@ -604,7 +613,7 @@ impl Session {
         };
         if let Some(id) = window_id {
             self.guard_input(id)?;
-            focus(id as isize)?;
+            prepare_target(id as isize, x, y)?;
         } else {
             self.guard_point(x, y)?;
         }
@@ -1017,28 +1026,51 @@ impl Session {
         info: &WindowInfo,
         scale: f32,
     ) -> Result<(Value, Value), String> {
+        crate::guard::desktop_available()?;
         self.generation = self.generation.saturating_add(1);
         let anchor = (info.left, info.top, info.right, info.bottom);
-        let mut shots = vec![self.capture_region(RegionCapture {
-            hwnd: info.hwnd as i64,
-            region: anchor,
-            anchor,
-            scale,
-            role: "window",
-            monitor: None,
-            z_index: 0,
-        })?];
+        let image = crate::window_capture::capture_window(info.hwnd)?;
+        let capture = if image.own_content {
+            "window"
+        } else {
+            "visible"
+        };
+        let content = (
+            image.left,
+            image.top,
+            image.left.saturating_add(image.width as i32),
+            image.top.saturating_add(image.height as i32),
+        );
+        let mut shots = vec![self.capture_from_image(
+            &image,
+            RegionCapture {
+                hwnd: info.hwnd as i64,
+                region: content,
+                anchor,
+                scale,
+                role: "window",
+                monitor: None,
+                z_index: 0,
+                capture,
+            },
+        )?];
         if let Ok(list) = monitors() {
             for (monitor, overlap) in spanning_slices(anchor, &list) {
-                shots.push(self.capture_region(RegionCapture {
-                    hwnd: info.hwnd as i64,
-                    region: overlap,
-                    anchor,
-                    scale,
-                    role: "monitor",
-                    monitor: Some(monitor.device),
-                    z_index: 0,
-                })?);
+                if let Ok(slice) = self.capture_from_image(
+                    &image,
+                    RegionCapture {
+                        hwnd: info.hwnd as i64,
+                        region: overlap,
+                        anchor,
+                        scale,
+                        role: "monitor",
+                        monitor: Some(monitor.device),
+                        z_index: 0,
+                        capture,
+                    },
+                ) {
+                    shots.push(slice);
+                }
             }
         }
         for (index, hwnd) in transient_windows(info.hwnd).into_iter().enumerate() {
@@ -1048,19 +1080,38 @@ impl Session {
             if popup.pid == std::process::id() || popup.pid != info.pid {
                 continue;
             }
-            let rect = (popup.left, popup.top, popup.right, popup.bottom);
+            let Ok(popup_image) = crate::window_capture::capture_window(popup.hwnd) else {
+                continue;
+            };
+            let popup_capture = if popup_image.own_content {
+                "window"
+            } else {
+                "visible"
+            };
+            let rect = (
+                popup_image.left,
+                popup_image.top,
+                popup_image.left.saturating_add(popup_image.width as i32),
+                popup_image.top.saturating_add(popup_image.height as i32),
+            );
             if rect.2 <= rect.0 || rect.3 <= rect.1 {
                 continue;
             }
-            shots.push(self.capture_region(RegionCapture {
-                hwnd: popup.hwnd as i64,
-                region: rect,
-                anchor: rect,
-                scale,
-                role: "transient",
-                monitor: None,
-                z_index: 10 + index as i32,
-            })?);
+            if let Ok(shot) = self.capture_from_image(
+                &popup_image,
+                RegionCapture {
+                    hwnd: popup.hwnd as i64,
+                    region: rect,
+                    anchor: (popup.left, popup.top, popup.right, popup.bottom),
+                    scale,
+                    role: "transient",
+                    monitor: None,
+                    z_index: 10 + index as i32,
+                    capture: popup_capture,
+                },
+            ) {
+                shots.push(shot);
+            }
         }
         let primary = &shots[0];
         let legacy = json!({
@@ -1069,11 +1120,13 @@ impl Session {
             "scale": primary["scale"],
             "width": primary["width"],
             "height": primary["height"],
+            "capture": primary["capture"],
             "note": format!(
-                "region pixel (px,py) -> screen ({left}+px, {top}+py). Image pixels are region pixels times scale {scale:.3}; divide image pixels by scale before clicking. screenshotId binds one region and does not convert image pixels. Extra screenshots are per-monitor slices and owned popups.",
-                left = info.left,
-                top = info.top,
-                scale = primary["scale"].as_f64().unwrap_or(1.0)
+                "region pixel (px,py) -> screen ({left}+px, {top}+py). Image pixels are region pixels times scale {scale:.3}; divide image pixels by scale before clicking. screenshotId binds one region and does not convert image pixels. Extra screenshots are per-monitor slices and owned popups. capture is {capture}: window means these pixels belong to the window even when it is covered.",
+                left = primary["originX"].as_i64().unwrap_or(info.left as i64),
+                top = primary["originY"].as_i64().unwrap_or(info.top as i64),
+                scale = primary["scale"].as_f64().unwrap_or(1.0),
+                capture = primary["capture"].as_str().unwrap_or(capture)
             ),
         });
         Ok((
@@ -1082,33 +1135,53 @@ impl Session {
         ))
     }
 
+    fn capture_from_image(
+        &mut self,
+        image: &crate::window_capture::WindowImage,
+        mut shot: RegionCapture,
+    ) -> Result<Value, String> {
+        let (pixels, width, height, left, top) =
+            crate::window_capture::crop_rgba(image, shot.region)?;
+        shot.region = (
+            left,
+            top,
+            left.saturating_add(width as i32),
+            top.saturating_add(height as i32),
+        );
+        let (png, effective, out_w, out_h) = encode_rgba(&pixels, width, height, shot.scale)?;
+        self.store_region(shot, png, effective, out_w, out_h)
+    }
+
     fn capture_region(&mut self, shot: RegionCapture) -> Result<Value, String> {
-        let RegionCapture {
-            hwnd,
-            region,
-            anchor,
-            scale,
-            role,
-            monitor,
-            z_index,
-        } = shot;
-        let rect = Rect::new(region.0, region.1, region.2, region.3);
-        let (png, effective, width, height) = capture_png(rect, scale)?;
+        let rect = Rect::new(shot.region.0, shot.region.1, shot.region.2, shot.region.3);
+        let (png, effective, width, height) = capture_png(rect, shot.scale)?;
+        self.store_region(shot, png, effective, width, height)
+    }
+
+    fn store_region(
+        &mut self,
+        shot: RegionCapture,
+        png: String,
+        effective: f32,
+        width: u32,
+        height: u32,
+    ) -> Result<Value, String> {
         self.shot_seq = self.shot_seq.saturating_add(1);
         let id = format!("ph-{}", self.shot_seq);
         let (virtual_left, virtual_top, virtual_width, virtual_height) = virtual_screen();
+        let region = shot.region;
         self.shots.push(ShotRecord {
             id: id.clone(),
-            hwnd,
+            hwnd: shot.hwnd,
             generation: self.generation,
             left: region.0,
             top: region.1,
             right: region.2,
             bottom: region.3,
-            anchor_left: anchor.0,
-            anchor_top: anchor.1,
-            anchor_right: anchor.2,
-            anchor_bottom: anchor.3,
+            anchor_left: shot.anchor.0,
+            anchor_top: shot.anchor.1,
+            anchor_right: shot.anchor.2,
+            anchor_bottom: shot.anchor.3,
             virtual_left,
             virtual_top,
             virtual_width,
@@ -1126,9 +1199,10 @@ impl Session {
             "height": height,
             "originX": region.0,
             "originY": region.1,
-            "zIndex": z_index,
-            "role": role,
-            "monitor": monitor,
+            "zIndex": shot.z_index,
+            "role": shot.role,
+            "monitor": shot.monitor,
+            "capture": shot.capture,
             "windowWidth": region.2.saturating_sub(region.0),
             "windowHeight": region.3.saturating_sub(region.1),
         }))
@@ -1255,7 +1329,7 @@ fn window_at(x: i32, y: i32) -> isize {
     }
 }
 
-fn focus(hwnd: isize) -> Result<(), String> {
+pub(crate) fn focus(hwnd: isize) -> Result<(), String> {
     use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     use windows::Win32::UI::WindowsAndMessaging::{
         AllowSetForegroundWindow, BringWindowToTop, GetAncestor, ASFW_ANY, GA_ROOTOWNER,
@@ -1303,6 +1377,73 @@ fn focus(hwnd: isize) -> Result<(), String> {
         }
     }
     Err(format!("could not focus window {hwnd}; no input was sent"))
+}
+
+/// Bring `hwnd` forward and refuse to send pointer input while a different window covers the point.
+fn prepare_target(hwnd: isize, x: i32, y: i32) -> Result<(), String> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, SetWindowPos, HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    };
+    focus(hwnd)?;
+    if point_hits_target(hwnd, x, y) {
+        return Ok(());
+    }
+    let handle = HWND(hwnd as *mut std::ffi::c_void);
+    unsafe {
+        let _ = SetWindowPos(
+            handle,
+            Some(HWND_TOP),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+        let _ = BringWindowToTop(handle);
+        let _ = SetForegroundWindow(handle);
+    }
+    crate::timing::sleep(Duration::from_millis(40))?;
+    if point_hits_target(hwnd, x, y) {
+        Ok(())
+    } else {
+        Err(format!(
+            "window {hwnd} stays covered at ({x}, {y}); no input was sent"
+        ))
+    }
+}
+
+fn point_hits_target(target: isize, x: i32, y: i32) -> bool {
+    let under = window_at(x, y);
+    same_window_family(target, under, owner_of(target), owner_of(under))
+}
+
+fn owner_of(hwnd: isize) -> isize {
+    if hwnd == 0 {
+        return 0;
+    }
+    unsafe {
+        let owner = GetAncestor(HWND(hwnd as *mut std::ffi::c_void), GA_ROOTOWNER);
+        if owner.0.is_null() {
+            hwnd
+        } else {
+            owner.0 as isize
+        }
+    }
+}
+
+fn same_window_family(
+    target: isize,
+    under: isize,
+    target_owner: isize,
+    under_owner: isize,
+) -> bool {
+    if under == 0 || target == 0 {
+        return false;
+    }
+    under == target
+        || under_owner == target
+        || target_owner == under
+        || (target_owner != 0 && under_owner == target_owner)
 }
 
 // Injection pacing never updates the physical-input activity clock.
@@ -2008,6 +2149,7 @@ fn public_shot(shot: &Value) -> Value {
         "monitor": shot["monitor"],
         "windowWidth": shot["windowWidth"],
         "windowHeight": shot["windowHeight"],
+        "capture": shot.get("capture").and_then(|value| value.as_str()).unwrap_or("visible"),
     })
 }
 
@@ -2066,18 +2208,25 @@ fn params_with_window<'a>(
 
 fn capture_png(rect: Rect, scale: f32) -> Result<(String, f32, u32, u32), String> {
     crate::guard::desktop_available()?;
-    let scale = scale.clamp(0.05, 1.0);
     let shot = Screenshot::capture_rect(rect)
         .map_err(|err| err.to_string())?
         .to_rgba();
-    let width = shot.width();
-    let height = shot.height();
+    encode_rgba(shot.pixels(), shot.width(), shot.height(), scale)
+}
+
+fn encode_rgba(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    scale: f32,
+) -> Result<(String, f32, u32, u32), String> {
+    let scale = scale.clamp(0.05, 1.0);
     let longest = width.max(height).max(1);
     let effective = scale.min(1568.0 / longest as f32);
     let (pixels, out_w, out_h) = if effective < 0.999 {
-        downsample(shot.pixels(), width, height, effective)
+        downsample(pixels, width, height, effective)
     } else {
-        (shot.pixels().to_vec(), width, height)
+        (pixels.to_vec(), width, height)
     };
     let mut bytes = Vec::new();
     let mut encoder = png::Encoder::new(&mut bytes, out_w, out_h);
@@ -2236,6 +2385,15 @@ fn visit_shortcuts(dir: &PathBuf, needle: &str, found: &mut Vec<Value>) -> std::
 #[cfg(test)]
 mod policy_tests {
     use super::app_allowed;
+
+    #[test]
+    fn a_covered_point_belongs_to_the_same_window_family() {
+        assert!(super::same_window_family(10, 10, 10, 10));
+        assert!(super::same_window_family(10, 22, 10, 10));
+        assert!(super::same_window_family(10, 9, 9, 9));
+        assert!(!super::same_window_family(10, 40, 10, 40));
+        assert!(!super::same_window_family(10, 0, 10, 0));
+    }
 
     #[test]
     fn densify_keeps_endpoints_and_step() {

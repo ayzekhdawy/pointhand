@@ -10,6 +10,7 @@ mod keys;
 mod motion;
 mod overlay;
 mod timing;
+mod window_capture;
 
 use std::io::{self, BufRead, Write};
 use std::process::exit;

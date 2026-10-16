@@ -58,7 +58,7 @@ PointHand reproduced the Mona Lisa in Microsoft Paint through its own MCP server
 
 The TypeScript MCP server connects your agent to a native Rust host. Windows input, accessibility and the overlay run in that host. The portable package needs **Node.js 20+**; Rust and Python are only needed for development or optional components.
 
-**Release status:** **v0.2.0-alpha.2** is an alpha for supervised workflows with 26 MCP tools, including `emergency_stop` and monitor/DPI diagnostics. See the [release notes](docs/releases/alpha-2.md) and [validation limits](docs/release-checklist.md). Alpha 1 remains available as an older 25-tool build.
+**Release status:** **v0.2.0-alpha.3** is an alpha for supervised workflows with 26 MCP tools. A covered window can be captured from its own pixels, and pointer actions bring that window forward. See the [release notes](docs/releases/alpha-3.md) and [validation limits](docs/release-checklist.md). Alpha 2 remains available.
 
 ## Quick start
 
@@ -95,7 +95,7 @@ For the complete portrait workflow, follow the [Mona Lisa tutorial](examples/mon
 - **Scoped access:** restrict receiving apps with executable names or exact paths in `POINTHAND_ALLOW`.
 - **Input cleanup:** interrupted strokes release held buttons. Alpha 2 also provides an out-of-band `emergency_stop` tool that stops active and queued mutations until restart.
 
-Use PointHand in a supervised desktop session. App permissions are a guardrail, not a sandbox against malicious local software. Screenshots capture visible pixels; an obscured window is not a background rendering surface, and elevated windows can reject input. Read the [security policy](SECURITY.md) and [input behavior guide](docs/input-behavior.md).
+Use PointHand in a supervised desktop session. App permissions are a guardrail, not a sandbox against malicious local software. Window screenshots use the window's own pixels when Windows graphics capture is available, so a covered window stays where it is. Pointer actions bring that window forward and do not click a window that remains on top. Desktop screenshots are the visible composite. Elevated windows can still reject input. Read the [security policy](SECURITY.md) and [input behavior guide](docs/input-behavior.md).
 
 ## Tested on the desktop
 
