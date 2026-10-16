@@ -50,6 +50,19 @@ struct CachedNode {
     selected: bool,
 }
 
+/// Window handle plus the region's left, top, right, and bottom in physical pixels.
+type RegionFrame = (i64, i32, i32, i32, i32);
+
+struct RegionCapture {
+    hwnd: i64,
+    region: (i32, i32, i32, i32),
+    anchor: (i32, i32, i32, i32),
+    scale: f32,
+    role: &'static str,
+    monitor: Option<String>,
+    z_index: i32,
+}
+
 /// One bounded screenshot. Coordinates for its id are physical pixels inside this
 /// region, whose screen origin may sit on any monitor. Sibling regions from the
 /// same capture share `generation`. A later capture of the same target replaces them.
@@ -255,16 +268,15 @@ impl Session {
         };
         let (left, top, right, bottom) =
             requested.unwrap_or((origin_x, origin_y, origin_x + width, origin_y + height));
-        let primary = self.capture_region(
-            0,
-            (left, top, right, bottom),
-            (left, top, right, bottom),
-            Rect::new(left, top, right, bottom),
+        let primary = self.capture_region(RegionCapture {
+            hwnd: 0,
+            region: (left, top, right, bottom),
+            anchor: (left, top, right, bottom),
             scale,
-            "desktop",
-            None,
-            0,
-        )?;
+            role: "desktop",
+            monitor: None,
+            z_index: 0,
+        })?;
         // The combined virtual desktop stays screenshots[0] so its id matches the
         // image the model sees. A second monitor is its own region; a single
         // display that already equals the virtual screen is not captured twice.
@@ -275,16 +287,15 @@ impl Session {
                 if overlap == (left, top, right, bottom) {
                     continue;
                 }
-                regions.push(self.capture_region(
-                    0,
-                    overlap,
-                    overlap,
-                    Rect::new(monitor.left, monitor.top, monitor.right, monitor.bottom),
+                regions.push(self.capture_region(RegionCapture {
+                    hwnd: 0,
+                    region: overlap,
+                    anchor: overlap,
                     scale,
-                    "monitor",
-                    Some(monitor.device),
-                    0,
-                )?);
+                    role: "monitor",
+                    monitor: Some(monitor.device),
+                    z_index: 0,
+                })?);
             }
         }
         Ok(json!({
@@ -307,9 +318,17 @@ impl Session {
     pub fn click(&mut self, params: &Value) -> Result<Value, String> {
         let hinted = params.get("window_id").and_then(|v| v.as_i64());
         let frame = self.bound_frame(params, hinted)?;
-        let (x, y, window_id) = if params.get("element_index").and_then(|v| v.as_i64()).is_some_and(|index| index >= 0) {
+        let (x, y, window_id) = if params
+            .get("element_index")
+            .and_then(|v| v.as_i64())
+            .is_some_and(|index| index >= 0)
+        {
             let mut stash = None;
-            let params = params_with_window(params, frame.map(|item| item.0).filter(|hwnd| *hwnd != 0), &mut stash);
+            let params = params_with_window(
+                params,
+                frame.map(|item| item.0).filter(|hwnd| *hwnd != 0),
+                &mut stash,
+            );
             self.resolve_point(params)?
         } else if let Some(frame) = frame {
             let point = point_in_frame(int_key(params, &["x"])?, int_key(params, &["y"])?, frame)?;
@@ -360,7 +379,11 @@ impl Session {
     pub fn move_to(&mut self, params: &Value) -> Result<Value, String> {
         let hinted = params.get("window_id").and_then(|v| v.as_i64());
         let frame = self.bound_frame(params, hinted)?;
-        let (x, y, window_id) = if params.get("element_index").and_then(|v| v.as_i64()).is_some_and(|index| index >= 0) {
+        let (x, y, window_id) = if params
+            .get("element_index")
+            .and_then(|v| v.as_i64())
+            .is_some_and(|index| index >= 0)
+        {
             self.resolve_point(params)?
         } else if let Some(frame) = frame {
             let point = point_in_frame(int_key(params, &["x"])?, int_key(params, &["y"])?, frame)?;
@@ -404,26 +427,26 @@ impl Session {
             )
         } else {
             match hinted {
-            Some(id) => {
-                self.guard_input(id)?;
-                let info =
-                    describe(id as isize).ok_or_else(|| format!("window {id} is not open"))?;
-                focus(id as isize)?;
-                (
-                    Point::new(
-                        info.left.checked_add(x1).ok_or("drag x out of range")?,
-                        info.top.checked_add(y1).ok_or("drag y out of range")?,
-                    ),
-                    Point::new(
-                        info.left.checked_add(x2).ok_or("drag x out of range")?,
-                        info.top.checked_add(y2).ok_or("drag y out of range")?,
-                    ),
-                )
-            }
-            None => {
-                self.guard_point(x1, y1)?;
-                (Point::new(x1, y1), Point::new(x2, y2))
-            }
+                Some(id) => {
+                    self.guard_input(id)?;
+                    let info =
+                        describe(id as isize).ok_or_else(|| format!("window {id} is not open"))?;
+                    focus(id as isize)?;
+                    (
+                        Point::new(
+                            info.left.checked_add(x1).ok_or("drag x out of range")?,
+                            info.top.checked_add(y1).ok_or("drag y out of range")?,
+                        ),
+                        Point::new(
+                            info.left.checked_add(x2).ok_or("drag x out of range")?,
+                            info.top.checked_add(y2).ok_or("drag y out of range")?,
+                        ),
+                    )
+                }
+                None => {
+                    self.guard_point(x1, y1)?;
+                    (Point::new(x1, y1), Point::new(x2, y2))
+                }
             }
         };
         let dense = densify(
@@ -948,7 +971,7 @@ impl Session {
         &self,
         params: &Value,
         window_id: Option<i64>,
-    ) -> Result<Option<(i64, i32, i32, i32, i32)>, String> {
+    ) -> Result<Option<RegionFrame>, String> {
         let Some(raw) = screenshot_id_param(params)? else {
             return Ok(None);
         };
@@ -958,9 +981,15 @@ impl Session {
             .iter()
             .rev()
             .find(|shot| shot.id == raw.trim())
-            .ok_or_else(|| format!("screenshotId {} is not cached; call get_window_state again", raw.trim()))?;
+            .ok_or_else(|| {
+                format!(
+                    "screenshotId {} is not cached; call get_window_state again",
+                    raw.trim()
+                )
+            })?;
         if hwnd != 0 {
-            let info = describe(hwnd as isize).ok_or_else(|| format!("window {hwnd} is not open"))?;
+            let info =
+                describe(hwnd as isize).ok_or_else(|| format!("window {hwnd} is not open"))?;
             check_shot(
                 &self.shots,
                 raw,
@@ -990,32 +1019,32 @@ impl Session {
     ) -> Result<(Value, Value), String> {
         self.generation = self.generation.saturating_add(1);
         let anchor = (info.left, info.top, info.right, info.bottom);
-        let mut shots = vec![self.capture_region(
-            info.hwnd as i64,
+        let mut shots = vec![self.capture_region(RegionCapture {
+            hwnd: info.hwnd as i64,
+            region: anchor,
             anchor,
-            anchor,
-            Rect::new(info.left, info.top, info.right, info.bottom),
             scale,
-            "window",
-            None,
-            0,
-        )?];
+            role: "window",
+            monitor: None,
+            z_index: 0,
+        })?];
         if let Ok(list) = monitors() {
             for (monitor, overlap) in spanning_slices(anchor, &list) {
-                shots.push(self.capture_region(
-                    info.hwnd as i64,
-                    overlap,
+                shots.push(self.capture_region(RegionCapture {
+                    hwnd: info.hwnd as i64,
+                    region: overlap,
                     anchor,
-                    Rect::new(overlap.0, overlap.1, overlap.2, overlap.3),
                     scale,
-                    "monitor",
-                    Some(monitor.device),
-                    0,
-                )?);
+                    role: "monitor",
+                    monitor: Some(monitor.device),
+                    z_index: 0,
+                })?);
             }
         }
         for (index, hwnd) in transient_windows(info.hwnd).into_iter().enumerate() {
-            let Some(popup) = describe(hwnd) else { continue };
+            let Some(popup) = describe(hwnd) else {
+                continue;
+            };
             if popup.pid == std::process::id() || popup.pid != info.pid {
                 continue;
             }
@@ -1023,16 +1052,15 @@ impl Session {
             if rect.2 <= rect.0 || rect.3 <= rect.1 {
                 continue;
             }
-            shots.push(self.capture_region(
-                popup.hwnd as i64,
-                rect,
-                rect,
-                Rect::new(popup.left, popup.top, popup.right, popup.bottom),
+            shots.push(self.capture_region(RegionCapture {
+                hwnd: popup.hwnd as i64,
+                region: rect,
+                anchor: rect,
                 scale,
-                "transient",
-                None,
-                10 + index as i32,
-            )?);
+                role: "transient",
+                monitor: None,
+                z_index: 10 + index as i32,
+            })?);
         }
         let primary = &shots[0];
         let legacy = json!({
@@ -1048,20 +1076,23 @@ impl Session {
                 scale = primary["scale"].as_f64().unwrap_or(1.0)
             ),
         });
-        Ok((legacy, Value::Array(shots.iter().map(public_shot).collect())))
+        Ok((
+            legacy,
+            Value::Array(shots.iter().map(public_shot).collect()),
+        ))
     }
 
-    fn capture_region(
-        &mut self,
-        hwnd: i64,
-        region: (i32, i32, i32, i32),
-        anchor: (i32, i32, i32, i32),
-        rect: Rect,
-        scale: f32,
-        role: &str,
-        monitor: Option<String>,
-        z_index: i32,
-    ) -> Result<Value, String> {
+    fn capture_region(&mut self, shot: RegionCapture) -> Result<Value, String> {
+        let RegionCapture {
+            hwnd,
+            region,
+            anchor,
+            scale,
+            role,
+            monitor,
+            z_index,
+        } = shot;
+        let rect = Rect::new(region.0, region.1, region.2, region.3);
         let (png, effective, width, height) = capture_png(rect, scale)?;
         self.shot_seq = self.shot_seq.saturating_add(1);
         let id = format!("ph-{}", self.shot_seq);
@@ -1915,9 +1946,11 @@ fn check_shot(
     if id.is_empty() {
         return Err("screenshotId must be a non-empty string".into());
     }
-    let shot = shots.iter().rev().find(|shot| shot.id == id).ok_or_else(|| {
-        format!("screenshotId {id} is not cached; call get_window_state again")
-    })?;
+    let shot = shots
+        .iter()
+        .rev()
+        .find(|shot| shot.id == id)
+        .ok_or_else(|| format!("screenshotId {id} is not cached; call get_window_state again"))?;
     if let Some(window_id) = window_id {
         if window_id != shot.hwnd {
             return Err("screenshotId belongs to a different window".into());
@@ -1943,11 +1976,7 @@ fn check_shot(
     Ok(shot.hwnd)
 }
 
-fn point_in_frame(
-    x: i32,
-    y: i32,
-    frame: (i64, i32, i32, i32, i32),
-) -> Result<(i32, i32, Option<i64>), String> {
+fn point_in_frame(x: i32, y: i32, frame: RegionFrame) -> Result<(i32, i32, Option<i64>), String> {
     let (hwnd, left, top, right, bottom) = frame;
     let width = right.saturating_sub(left);
     let height = bottom.saturating_sub(top);
@@ -1962,7 +1991,10 @@ fn point_in_frame(
 }
 
 fn public_shot(shot: &Value) -> Value {
-    let png = shot.get("png_base64").and_then(|v| v.as_str()).unwrap_or("");
+    let png = shot
+        .get("png_base64")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     json!({
         "id": shot["id"],
         "url": format!("data:image/png;base64,{png}"),
@@ -2001,8 +2033,11 @@ fn spanning_slices(
     let hits: Vec<_> = monitors
         .iter()
         .filter_map(|monitor| {
-            intersection(window, (monitor.left, monitor.top, monitor.right, monitor.bottom))
-                .map(|overlap| (monitor.clone(), overlap))
+            intersection(
+                window,
+                (monitor.left, monitor.top, monitor.right, monitor.bottom),
+            )
+            .map(|overlap| (monitor.clone(), overlap))
         })
         .collect();
     if hits.len() < 2 {
@@ -2238,9 +2273,11 @@ mod policy_tests {
         assert!(super::check_shot(&shots, "ph-2", Some(9), None)
             .unwrap_err()
             .contains("different"));
-        assert!(super::check_shot(&shots, "ph-2", Some(7), Some((10, 0, 110, 50)))
-            .unwrap_err()
-            .contains("moved"));
+        assert!(
+            super::check_shot(&shots, "ph-2", Some(7), Some((10, 0, 110, 50)))
+                .unwrap_err()
+                .contains("moved")
+        );
         assert!(super::check_shot(&shots, "  ", None, None).is_err());
         assert!(super::screenshot_id_param(&serde_json::json!({"screenshotId": 4})).is_err());
     }
@@ -2494,7 +2531,10 @@ fn monitors_touching(left: i32, top: i32, right: i32, bottom: i32) -> Value {
                 )?;
                 let mut row = monitor_json(monitor);
                 if let Some(map) = row.as_object_mut() {
-                    map.insert("overlap".into(), json!([overlap.0, overlap.1, overlap.2, overlap.3]));
+                    map.insert(
+                        "overlap".into(),
+                        json!([overlap.0, overlap.1, overlap.2, overlap.3]),
+                    );
                 }
                 Some(row)
             })
