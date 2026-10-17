@@ -2,24 +2,26 @@
 //!
 //! A window screenshot uses that window's own pixels when Windows graphics
 //! capture is available, including while another window covers it. Pointer
-//! actions then bring that window forward and refuse a point that stays covered.
+//! actions then bring that window forward. A point that stays covered is not clicked;
+//! the refusal names the covering process and attaches a fresh target screenshot.
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
 use serde_json::{json, Value};
 use uiautomation::inputs::{Mouse, MouseButton};
 use uiautomation::patterns::{
-    UIExpandCollapsePattern, UIInvokePattern, UIScrollItemPattern, UIScrollPattern,
-    UISelectionItemPattern, UITextPattern, UIValuePattern,
+    UIExpandCollapsePattern, UIInvokePattern, UIRangeValuePattern, UIScrollItemPattern,
+    UIScrollPattern, UISelectionItemPattern, UITextPattern, UIValuePattern,
 };
 use uiautomation::screenshots::Screenshot;
-use uiautomation::types::{Point, Rect};
+use uiautomation::types::{ControlType, Point, Rect};
 use uiautomation::{UIAutomation, UIElement, UITreeWalker};
 use windows::core::{BOOL, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
 };
@@ -39,8 +41,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 const MAX_NODES: usize = 400;
+const MAX_PASTE_CHARS: usize = 200_000;
 const MAX_DEPTH: usize = 14;
 const MAX_CHILDREN: usize = 64;
+const STATE_FLOOR_MS: u64 = 1000;
+const STATE_EXTRA_MS: u64 = 5000;
+const STATE_POLL_MS: u64 = 200;
+const STATE_WALK_DEPTH: usize = 8;
+const STATE_WALK_NODES: usize = 64;
 
 struct CachedNode {
     element: UIElement,
@@ -211,6 +219,7 @@ impl Session {
     pub fn activate(&mut self, window_id: i64) -> Result<Value, String> {
         self.guard_input(window_id)?;
         focus(window_id as isize)?;
+        note_action();
         self.get_window(window_id)
     }
 
@@ -225,9 +234,14 @@ impl Session {
         if shot {
             self.guard_input(window_id)?;
         }
+        let waited_ms = self.settle_before_observation(window_id as isize)?;
         let info = describe(window_id as isize)
             .ok_or_else(|| format!("window {window_id} is not open"))?;
-        let mut result = json!({ "window": info.to_json(), "accessibility": null });
+        let mut result = json!({
+            "window": info.to_json(),
+            "accessibility": null,
+            "waited_ms": waited_ms,
+        });
         if text {
             let tree = self.snapshot(window_id as isize)?;
             result["accessibility"] = accessibility_payload(&self.nodes, &tree);
@@ -245,7 +259,6 @@ impl Session {
     pub fn screenshot(&mut self, params: &Value) -> Result<Value, String> {
         let (origin_x, origin_y, width, height) = virtual_screen();
         let scale = params.get("scale").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32;
-        self.generation = self.generation.saturating_add(1);
         let requested = match params.get("region").and_then(|v| v.as_array()) {
             Some(region) if region.len() == 4 => {
                 let value = |index: usize| {
@@ -265,6 +278,10 @@ impl Session {
             Some(_) => return Err("region must be [left, top, right, bottom]".into()),
             None => None,
         };
+        // Wait before the generation bump. Escape during the wait must not stale
+        // the previous screenshotId.
+        let waited_ms = self.settle_before_observation(0)?;
+        self.generation = self.generation.saturating_add(1);
         let (left, top, right, bottom) =
             requested.unwrap_or((origin_x, origin_y, origin_x + width, origin_y + height));
         let primary = self.capture_region(RegionCapture {
@@ -300,6 +317,7 @@ impl Session {
             }
         }
         Ok(json!({
+            "waited_ms": waited_ms,
             "screenshot": {
                 "id": primary["id"],
                 "png_base64": primary["png_base64"],
@@ -339,7 +357,9 @@ impl Session {
         };
         if let Some(id) = window_id {
             self.guard_input(id)?;
-            prepare_target(id as isize, x, y)?;
+            if let Some(refusal) = self.pointer_target(id as isize, x, y)? {
+                return Ok(refusal);
+            }
         } else {
             self.guard_point(x, y)?;
         }
@@ -394,7 +414,9 @@ impl Session {
         };
         if let Some(id) = window_id {
             self.guard_input(id)?;
-            prepare_target(id as isize, x, y)?;
+            if let Some(refusal) = self.pointer_target(id as isize, x, y)? {
+                return Ok(refusal);
+            }
         } else {
             self.guard_point(x, y)?;
         }
@@ -415,7 +437,9 @@ impl Session {
             let start = point_in_frame(x1, y1, frame)?;
             if frame.0 != 0 {
                 self.guard_input(frame.0)?;
-                prepare_target(frame.0 as isize, start.0, start.1)?;
+                if let Some(refusal) = self.pointer_target(frame.0 as isize, start.0, start.1)? {
+                    return Ok(refusal);
+                }
             } else {
                 self.guard_point(start.0, start.1)?;
             }
@@ -432,11 +456,13 @@ impl Session {
                     self.guard_input(id)?;
                     let info =
                         describe(id as isize).ok_or_else(|| format!("window {id} is not open"))?;
-                    prepare_target(
+                    if let Some(refusal) = self.pointer_target(
                         id as isize,
                         info.left.saturating_add(x1),
                         info.top.saturating_add(y1),
-                    )?;
+                    )? {
+                        return Ok(refusal);
+                    }
                     (
                         Point::new(
                             info.left.checked_add(x1).ok_or("drag x out of range")?,
@@ -497,11 +523,13 @@ impl Session {
         if let Some(id) = window_id {
             self.guard_input(id)?;
             let info = describe(id as isize).ok_or_else(|| format!("window {id} is not open"))?;
-            prepare_target(
+            if let Some(refusal) = self.pointer_target(
                 id as isize,
                 info.left.saturating_add(points[0].0),
                 info.top.saturating_add(points[0].1),
-            )?;
+            )? {
+                return Ok(refusal);
+            }
             for point in &mut points {
                 point.0 = point
                     .0
@@ -579,7 +607,9 @@ impl Session {
             .unwrap_or(0)
             .clamp(0, 200) as i32;
         self.guard_input(id)?;
-        prepare_target(id as isize, lines[0][0].0, lines[0][0].1)?;
+        if let Some(refusal) = self.pointer_target(id as isize, lines[0][0].0, lines[0][0].1)? {
+            return Ok(refusal);
+        }
         let start = Instant::now();
         STROKE_HOLD_MS.store(hold_ms, std::sync::atomic::Ordering::Relaxed);
         let outcome = (|| -> Result<(), String> {
@@ -613,7 +643,9 @@ impl Session {
         };
         if let Some(id) = window_id {
             self.guard_input(id)?;
-            prepare_target(id as isize, x, y)?;
+            if let Some(refusal) = self.pointer_target(id as isize, x, y)? {
+                return Ok(refusal);
+            }
         } else {
             self.guard_point(x, y)?;
         }
@@ -705,6 +737,7 @@ impl Session {
             .get_pattern()
             .map_err(|_| format!("element [{index}] is not editable"))?;
         pattern.set_value(&value).map_err(|err| err.to_string())?;
+        note_action();
         Ok(json!({"set": index}))
     }
 
@@ -746,6 +779,7 @@ impl Session {
             }
             other => return Err(format!("unknown action {other}")),
         }
+        note_action();
         Ok(json!({"ran": action, "element": index}))
     }
 
@@ -754,15 +788,32 @@ impl Session {
             .get("text")
             .and_then(|v| v.as_str())
             .ok_or("missing text")?;
+        if text.chars().count() > MAX_PASTE_CHARS {
+            return Err(format!("paste text exceeds {MAX_PASTE_CHARS} characters"));
+        }
+        let format = paste_format(params)?;
+        let (plain, html) = match format {
+            "html" => (html_to_plain(text), Some(text.to_string())),
+            "md" => (text.to_string(), Some(markdown_to_html(text))),
+            _ => (text.to_string(), None),
+        };
         if let Some(id) = params.get("window_id").and_then(|v| v.as_i64()) {
             self.guard_input(id)?;
             focus(id as isize)?;
         } else {
             self.guard_foreground()?;
         }
-        self.clipboard_write(text)?;
+        if let Some(html) = html.as_deref() {
+            crate::guard::prepare()?;
+            crate::guard::begin_action();
+            write_rich_clipboard(&plain, html)?;
+        } else {
+            self.clipboard_write(&plain)?;
+        }
+        crate::check_running()?;
         send_combo(&crate::keys::parse_combo("ctrl+v")?)?;
-        Ok(json!({"pasted": text.chars().count()}))
+        note_injection();
+        Ok(json!({"pasted": text.chars().count(), "format": format}))
     }
 
     pub fn clipboard_read(&self) -> Result<Value, String> {
@@ -804,6 +855,7 @@ impl Session {
                 code.0 as isize
             ));
         }
+        note_action();
         Ok(json!({"launched": target}))
     }
 
@@ -865,6 +917,18 @@ impl Session {
                 other => Err(format!("unknown action {other:?}")),
             };
             match outcome {
+                Ok(value) if is_covered_refusal(&value) => {
+                    let compact = batch_covered_result(&value);
+                    let message = compact
+                        .get("message")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or("point stayed covered; no input was sent")
+                        .to_string();
+                    results.push(
+                        json!({"index": index, "ok": false, "error": message, "result": compact}),
+                    );
+                    break;
+                }
                 Ok(value) => results.push(json!({"index": index, "ok": true, "result": value})),
                 Err(err) => {
                     results.push(json!({"index": index, "ok": false, "error": err}));
@@ -873,6 +937,80 @@ impl Session {
             }
         }
         Ok(Value::Array(results))
+    }
+
+    /// Wait out a recent action before reading the screen. Does not call the
+    /// idle gate. hwnd 0 samples the foreground window. Escape aborts the wait.
+    fn settle_before_observation(&self, hwnd: isize) -> Result<u64, String> {
+        let started = Instant::now();
+        let Some(elapsed) = action_age_ms() else {
+            return Ok(0);
+        };
+        if elapsed >= STATE_FLOOR_MS + STATE_EXTRA_MS {
+            return Ok(0);
+        }
+        let floor = STATE_FLOOR_MS.saturating_sub(elapsed);
+        if floor > 0 {
+            crate::timing::sleep(Duration::from_millis(floor))?;
+        }
+        let extra_ms = STATE_EXTRA_MS.saturating_sub(elapsed.saturating_sub(STATE_FLOOR_MS));
+        let extra_deadline = Instant::now() + Duration::from_millis(extra_ms);
+        let mut seen = Vec::new();
+        loop {
+            let sample = self.read_state_sample(hwnd);
+            let before = observation_wait_ms(elapsed, &seen);
+            seen.push(sample);
+            let after = observation_wait_ms(elapsed, &seen);
+            if after == before || Instant::now() >= extra_deadline {
+                break;
+            }
+            let remaining = extra_deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as u64;
+            let slice = (after - before).min(remaining);
+            if slice == 0 {
+                break;
+            }
+            crate::timing::sleep(Duration::from_millis(slice))?;
+        }
+        Ok(started.elapsed().as_millis() as u64)
+    }
+
+    /// Fingerprint the window without touching the accessibility snapshot cache.
+    /// A failed tree read keeps the window rectangle and is not treated as busy,
+    /// so two failures look stable.
+    fn read_state_sample(&self, hwnd: isize) -> StateSample {
+        let target = if hwnd == 0 {
+            unsafe { GetForegroundWindow().0 as isize }
+        } else {
+            hwnd
+        };
+        if target == 0 {
+            return StateSample {
+                busy: false,
+                signature: 0,
+            };
+        }
+        let signature = window_rect_signature(target);
+        let handle = uiautomation::types::Handle::from(HWND(target as *mut std::ffi::c_void));
+        let Ok(root) = self.automation.element_from_handle(handle) else {
+            return StateSample {
+                busy: false,
+                signature,
+            };
+        };
+        let mut signature = signature;
+        let mut busy = false;
+        let mut count = 0usize;
+        fold_state(
+            &self.walker,
+            &root,
+            0,
+            &mut signature,
+            &mut busy,
+            &mut count,
+        );
+        StateSample { busy, signature }
     }
 
     fn snapshot(&mut self, hwnd: isize) -> Result<String, String> {
@@ -1379,12 +1517,24 @@ pub(crate) fn focus(hwnd: isize) -> Result<(), String> {
     Err(format!("could not focus window {hwnd}; no input was sent"))
 }
 
-/// Bring `hwnd` forward and refuse to send pointer input while a different window covers the point.
-fn prepare_target(hwnd: isize, x: i32, y: i32) -> Result<(), String> {
+struct PointCovered {
+    target: isize,
+    x: i32,
+    y: i32,
+    covering: isize,
+}
+
+enum PointerBlock {
+    Failed(String),
+    Covered(PointCovered),
+}
+
+/// Bring `hwnd` forward. A point that a different window still covers is not an input target.
+fn prepare_target(hwnd: isize, x: i32, y: i32) -> Result<(), PointerBlock> {
     use windows::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, SetWindowPos, HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     };
-    focus(hwnd)?;
+    focus(hwnd).map_err(PointerBlock::Failed)?;
     if point_hits_target(hwnd, x, y) {
         return Ok(());
     }
@@ -1402,14 +1552,172 @@ fn prepare_target(hwnd: isize, x: i32, y: i32) -> Result<(), String> {
         let _ = BringWindowToTop(handle);
         let _ = SetForegroundWindow(handle);
     }
-    crate::timing::sleep(Duration::from_millis(40))?;
+    crate::timing::sleep(Duration::from_millis(40)).map_err(PointerBlock::Failed)?;
     if point_hits_target(hwnd, x, y) {
         Ok(())
     } else {
-        Err(format!(
-            "window {hwnd} stays covered at ({x}, {y}); no input was sent"
-        ))
+        Err(PointerBlock::Covered(PointCovered {
+            target: hwnd,
+            x,
+            y,
+            covering: window_at(x, y),
+        }))
     }
+}
+
+impl Session {
+    /// One raise, then a refusal. The refusal carries a fresh target screenshot when capture works.
+    fn pointer_target(&mut self, hwnd: isize, x: i32, y: i32) -> Result<Option<Value>, String> {
+        match prepare_target(hwnd, x, y) {
+            Ok(()) => Ok(None),
+            Err(PointerBlock::Failed(message)) => Err(message),
+            Err(PointerBlock::Covered(miss)) => Ok(Some(covered_refusal(self, miss)?)),
+        }
+    }
+}
+
+fn covered_refusal(session: &mut Session, miss: PointCovered) -> Result<Value, String> {
+    let covering = describe(miss.covering);
+    let process = covering
+        .as_ref()
+        .map(|info| executable_name(&info.app))
+        .unwrap_or_else(|| "unknown".into());
+    let title = covering
+        .as_ref()
+        .map(|info| info.title.clone())
+        .unwrap_or_default();
+    let mut screenshot_id = None;
+    let mut views = None;
+    if let Some(info) = describe(miss.target) {
+        match session.capture_window_views(&info, 0.5) {
+            Ok(captured) => {
+                screenshot_id = captured
+                    .0
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string);
+                views = Some(captured);
+            }
+            Err(error) if error.contains("stopped by Escape") => return Err(error),
+            Err(_) => {}
+        }
+    }
+    let message = covered_message(
+        miss.target,
+        miss.x,
+        miss.y,
+        &process,
+        &title,
+        screenshot_id.as_deref(),
+    );
+    let mut body = json!({
+        "acted": false,
+        "reason": "covered",
+        "retry": "once",
+        "point": [miss.x, miss.y],
+        "window_id": miss.target,
+        "covering": {
+            "hwnd": miss.covering,
+            "title": title,
+            "process": process,
+        },
+        "message": message,
+    });
+    if let Some((legacy, shots)) = views {
+        body["screenshot"] = legacy;
+        body["screenshots"] = shots;
+    }
+    Ok(body)
+}
+
+fn covered_message(
+    target: isize,
+    x: i32,
+    y: i32,
+    process: &str,
+    title: &str,
+    screenshot_id: Option<&str>,
+) -> String {
+    let who = if title.is_empty() {
+        process.to_string()
+    } else {
+        format!("{process} ({title})")
+    };
+    let start = if process.eq_ignore_ascii_case("StartMenuExperienceHost.exe") {
+        " The covering window is the Start menu."
+    } else {
+        ""
+    };
+    match screenshot_id {
+        Some(id) => format!(
+            "Point ({x}, {y}) is over {who}, not window {target}. No input was sent. The target was brought forward once.{start} Retry this input once with screenshotId {id}. x and y are physical pixels inside that new region; divide image pixels by scale. Do not click the covering window and do not reuse the previous screenshotId."
+        ),
+        None => format!(
+            "Point ({x}, {y}) is over {who}, not window {target}. No input was sent. The target was brought forward once.{start} Call get_window_state for window {target}, then retry this input once with coordinates from that screenshot. Do not click the covering window and do not reuse the previous screenshotId."
+        ),
+    }
+}
+
+fn executable_name(path: &str) -> String {
+    let name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path)
+        .trim();
+    if name.is_empty() {
+        "unknown".into()
+    } else {
+        name.to_string()
+    }
+}
+
+fn is_covered_refusal(value: &Value) -> bool {
+    value.get("acted").and_then(|item| item.as_bool()) == Some(false)
+        && value.get("reason").and_then(|item| item.as_str()) == Some("covered")
+}
+
+/// Batch responses keep the refusal and drop image bytes. The agent takes a new window shot.
+fn batch_covered_result(value: &Value) -> Value {
+    let target = value
+        .get("window_id")
+        .and_then(|item| item.as_i64())
+        .unwrap_or(0);
+    let point = value.get("point").and_then(|item| item.as_array());
+    let x = point
+        .and_then(|item| item.first())
+        .and_then(|item| item.as_i64())
+        .unwrap_or(0);
+    let y = point
+        .and_then(|item| item.get(1))
+        .and_then(|item| item.as_i64())
+        .unwrap_or(0);
+    let process = value
+        .get("covering")
+        .and_then(|item| item.get("process"))
+        .and_then(|item| item.as_str())
+        .unwrap_or("unknown");
+    let title = value
+        .get("covering")
+        .and_then(|item| item.get("title"))
+        .and_then(|item| item.as_str())
+        .unwrap_or("");
+    let mut compact = value.clone();
+    if let Some(object) = compact.as_object_mut() {
+        object.remove("screenshot");
+        object.remove("screenshots");
+        object.insert(
+            "message".into(),
+            json!(covered_message(
+                target as isize,
+                x as i32,
+                y as i32,
+                process,
+                title,
+                None
+            )),
+        );
+    }
+    compact
 }
 
 fn point_hits_target(target: isize, x: i32, y: i32) -> bool {
@@ -1446,8 +1754,157 @@ fn same_window_family(
         || (target_owner != 0 && under_owner == target_owner)
 }
 
-// Injection pacing never updates the physical-input activity clock.
-fn note_injection() {}
+// The observation clock is separate from the physical idle gate. Mouse and
+// keyboard hooks still own LAST_PHYSICAL; this only records that an action
+// changed the screen.
+static LAST_ACTION: Mutex<Option<Instant>> = Mutex::new(None);
+
+#[derive(Clone, Copy)]
+struct StateSample {
+    busy: bool,
+    signature: u64,
+}
+
+fn note_action() {
+    let mut slot = LAST_ACTION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *slot = Some(Instant::now());
+}
+
+fn action_age_ms() -> Option<u64> {
+    let slot = LAST_ACTION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    slot.map(|at| at.elapsed().as_millis() as u64)
+}
+
+/// Sleep budget before the next observation. `elapsed_ms` is the age of the
+/// last action. `samples` are the fingerprints read after the one-second floor,
+/// in order. Two quiet samples with the same signature stop the wait. A visible
+/// progress indicator or a changing signature keeps polling, up to five extra
+/// seconds. The live loop in `Session::settle_before_observation` follows this
+/// budget and uses a wall clock so a slow walk cannot run past it.
+fn observation_wait_ms(elapsed_ms: u64, samples: &[StateSample]) -> u64 {
+    if elapsed_ms >= STATE_FLOOR_MS + STATE_EXTRA_MS {
+        return 0;
+    }
+    let mut waited = STATE_FLOOR_MS.saturating_sub(elapsed_ms);
+    let mut extra_left = STATE_EXTRA_MS.saturating_sub(elapsed_ms.saturating_sub(STATE_FLOOR_MS));
+    let mut previous: Option<StateSample> = None;
+    for sample in samples {
+        if let Some(prev) = previous {
+            if !prev.busy && !sample.busy && prev.signature == sample.signature {
+                return waited;
+            }
+        }
+        if extra_left == 0 {
+            return waited;
+        }
+        let slice = STATE_POLL_MS.min(extra_left);
+        extra_left -= slice;
+        waited += slice;
+        previous = Some(*sample);
+    }
+    waited
+}
+
+fn range_is_busy(value: Option<f64>, maximum: Option<f64>) -> bool {
+    match (value, maximum) {
+        (Some(value), Some(maximum)) => value < maximum - 0.5,
+        _ => true,
+    }
+}
+
+fn class_looks_busy(class_name: &str) -> bool {
+    let class = class_name.to_ascii_lowercase();
+    class.contains("progress") || class.contains("busyindicator") || class.contains("spinner")
+}
+
+fn mix_signature(signature: u64, value: u64) -> u64 {
+    signature.wrapping_mul(0x100000001b3).wrapping_add(value)
+}
+
+fn window_rect_signature(hwnd: isize) -> u64 {
+    let mut rect = RECT::default();
+    let ok = unsafe { GetWindowRect(HWND(hwnd as *mut std::ffi::c_void), &mut rect).is_ok() };
+    if !ok {
+        return 0;
+    }
+    let mut signature = 0u64;
+    for value in [rect.left, rect.top, rect.right, rect.bottom] {
+        signature = mix_signature(signature, value as u64);
+    }
+    signature
+}
+
+fn fold_state(
+    walker: &UITreeWalker,
+    element: &UIElement,
+    depth: usize,
+    signature: &mut u64,
+    busy: &mut bool,
+    count: &mut usize,
+) {
+    if *count >= STATE_WALK_NODES || depth > STATE_WALK_DEPTH {
+        return;
+    }
+    *count += 1;
+    let kind = element.get_control_type().ok();
+    let offscreen = element.is_offscreen().unwrap_or(true);
+    *signature = mix_signature(*signature, kind.map(|kind| kind as i32).unwrap_or(0) as u64);
+    if let Ok(rect) = element.get_bounding_rectangle() {
+        for value in [
+            rect.get_left() / 16,
+            rect.get_top() / 16,
+            rect.get_right() / 16,
+            rect.get_bottom() / 16,
+        ] {
+            *signature = mix_signature(*signature, value as u64);
+        }
+    }
+    *signature = mix_signature(*signature, u64::from(offscreen));
+    if !offscreen {
+        *busy |= element_is_busy(element, kind);
+    }
+    if depth == STATE_WALK_DEPTH {
+        return;
+    }
+    let mut child = walker.get_first_child(element).ok();
+    let mut children = 0;
+    while let Some(current) = child {
+        if *count >= STATE_WALK_NODES || children >= MAX_CHILDREN {
+            break;
+        }
+        fold_state(walker, &current, depth + 1, signature, busy, count);
+        children += 1;
+        child = walker.get_next_sibling(&current).ok();
+    }
+}
+
+fn element_is_busy(element: &UIElement, kind: Option<ControlType>) -> bool {
+    if kind == Some(ControlType::ScrollBar) {
+        return false;
+    }
+    if kind == Some(ControlType::ProgressBar) {
+        return progress_incomplete(element);
+    }
+    element
+        .get_classname()
+        .map(|name| class_looks_busy(&name))
+        .unwrap_or(false)
+}
+
+fn progress_incomplete(element: &UIElement) -> bool {
+    let Ok(pattern) = element.get_pattern::<UIRangeValuePattern>() else {
+        return range_is_busy(None, None);
+    };
+    range_is_busy(pattern.get_value().ok(), pattern.get_maximum().ok())
+}
+
+fn note_injection() {
+    note_action();
+}
 
 fn allow_list_on() -> bool {
     std::env::var("POINTHAND_ALLOW")
@@ -2263,6 +2720,446 @@ fn downsample(src: &[u8], width: u32, height: u32, scale: f32) -> (Vec<u8>, u32,
     (out, out_w, out_h)
 }
 
+fn paste_format(params: &Value) -> Result<&'static str, String> {
+    match params.get("format").and_then(|value| value.as_str()) {
+        None | Some("text") => Ok("text"),
+        Some("md") | Some("markdown") => Ok("md"),
+        Some("html") => Ok("html"),
+        Some(_) => Err("paste format must be text, md, or html".into()),
+    }
+}
+
+fn escape_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn safe_href(url: &str) -> Option<&str> {
+    let url = url.trim();
+    let lower = url.to_ascii_lowercase();
+    let allowed = lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("mailto:");
+    if !allowed
+        || url
+            .chars()
+            .any(|ch| ch.is_whitespace() || matches!(ch, '"' | '<' | '>'))
+    {
+        return None;
+    }
+    Some(url)
+}
+
+fn inline_markdown(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        if let Some(inner) = rest.strip_prefix('`') {
+            if let Some(end) = inner.find('`') {
+                out.push_str("<code>");
+                out.push_str(&escape_html(&inner[..end]));
+                out.push_str("</code>");
+                rest = &inner[end + 1..];
+                continue;
+            }
+        }
+        if let Some(inner) = rest.strip_prefix("**") {
+            if let Some(end) = inner.find("**") {
+                out.push_str("<strong>");
+                out.push_str(&escape_html(&inner[..end]));
+                out.push_str("</strong>");
+                rest = &inner[end + 2..];
+                continue;
+            }
+        }
+        if let Some((inner, next)) = take_emphasis(rest, '*') {
+            out.push_str("<em>");
+            out.push_str(&escape_html(inner));
+            out.push_str("</em>");
+            rest = next;
+            continue;
+        }
+        if let Some((inner, next)) = take_emphasis(rest, '_') {
+            out.push_str("<em>");
+            out.push_str(&escape_html(inner));
+            out.push_str("</em>");
+            rest = next;
+            continue;
+        }
+        if let Some((label, url, used)) = parse_link(rest) {
+            if let Some(href) = safe_href(url) {
+                out.push_str("<a href=\"");
+                out.push_str(&escape_html(href));
+                out.push_str("\">");
+                out.push_str(&inline_markdown(label));
+                out.push_str("</a>");
+            } else {
+                out.push_str(&inline_markdown(label));
+            }
+            rest = &rest[used..];
+            continue;
+        }
+        let ch = rest.chars().next().unwrap_or('\u{0}');
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+        rest = &rest[ch.len_utf8()..];
+    }
+    out
+}
+
+fn take_emphasis(text: &str, marker: char) -> Option<(&str, &str)> {
+    if !text.starts_with(marker) || text.chars().nth(1) == Some(marker) {
+        return None;
+    }
+    let inner = &text[marker.len_utf8()..];
+    let end = inner.find(marker)?;
+    if end == 0 || inner[end..].chars().nth(1) == Some(marker) {
+        return None;
+    }
+    Some((&inner[..end], &inner[end + marker.len_utf8()..]))
+}
+
+fn parse_link(text: &str) -> Option<(&str, &str, usize)> {
+    if !text.starts_with('[') {
+        return None;
+    }
+    let label_end = text.find(']')?;
+    if !text[label_end + 1..].starts_with('(') {
+        return None;
+    }
+    let url_start = label_end + 2;
+    let url_end = text[url_start..].find(')')?;
+    Some((
+        &text[1..label_end],
+        &text[url_start..url_start + url_end],
+        url_start + url_end + 1,
+    ))
+}
+
+fn heading_level(line: &str) -> Option<(usize, &str)> {
+    let hashes = line.chars().take_while(|ch| *ch == '#').count();
+    if !(1..=6).contains(&hashes) {
+        return None;
+    }
+    let rest = line.get(hashes..)?;
+    let text = rest.strip_prefix(' ')?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some((hashes, text))
+}
+
+fn unordered_item(line: &str) -> Option<&str> {
+    line.strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+}
+
+fn ordered_item(line: &str) -> Option<&str> {
+    let digits = line.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    if digits == 0 || digits > 6 {
+        return None;
+    }
+    line[digits..]
+        .strip_prefix(". ")
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+}
+
+fn markdown_to_html(src: &str) -> String {
+    let lines: Vec<&str> = src.lines().collect();
+    let mut html = String::new();
+    let mut paragraph = String::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index].trim();
+        if line.is_empty() {
+            flush_paragraph(&mut html, &mut paragraph);
+            index += 1;
+            continue;
+        }
+        if line.starts_with("```") {
+            flush_paragraph(&mut html, &mut paragraph);
+            index += 1;
+            let mut code = String::new();
+            while index < lines.len() && !lines[index].trim_start().starts_with("```") {
+                code.push_str(lines[index]);
+                code.push('\n');
+                index += 1;
+            }
+            if index < lines.len() {
+                index += 1;
+            }
+            html.push_str("<pre><code>");
+            html.push_str(&escape_html(&code));
+            html.push_str("</code></pre>");
+            continue;
+        }
+        if let Some((level, text)) = heading_level(line) {
+            flush_paragraph(&mut html, &mut paragraph);
+            html.push_str(&format!("<h{level}>{}</h{level}>", inline_markdown(text)));
+            index += 1;
+            continue;
+        }
+        if unordered_item(line).is_some() {
+            flush_paragraph(&mut html, &mut paragraph);
+            html.push_str("<ul>");
+            while index < lines.len() {
+                let Some(item) = lines
+                    .get(index)
+                    .and_then(|line| unordered_item(line.trim()))
+                else {
+                    break;
+                };
+                html.push_str("<li>");
+                html.push_str(&inline_markdown(item));
+                html.push_str("</li>");
+                index += 1;
+            }
+            html.push_str("</ul>");
+            continue;
+        }
+        if ordered_item(line).is_some() {
+            flush_paragraph(&mut html, &mut paragraph);
+            html.push_str("<ol>");
+            while index < lines.len() {
+                let Some(item) = lines.get(index).and_then(|line| ordered_item(line.trim())) else {
+                    break;
+                };
+                html.push_str("<li>");
+                html.push_str(&inline_markdown(item));
+                html.push_str("</li>");
+                index += 1;
+            }
+            html.push_str("</ol>");
+            continue;
+        }
+        if !paragraph.is_empty() {
+            paragraph.push(' ');
+        }
+        paragraph.push_str(line);
+        index += 1;
+    }
+    flush_paragraph(&mut html, &mut paragraph);
+    html
+}
+
+fn flush_paragraph(html: &mut String, paragraph: &mut String) {
+    let trimmed = paragraph.trim();
+    if !trimmed.is_empty() {
+        html.push_str("<p>");
+        html.push_str(&inline_markdown(trimmed));
+        html.push_str("</p>");
+    }
+    paragraph.clear();
+}
+
+fn html_to_plain(html: &str) -> String {
+    let mut out = String::new();
+    let mut rest = html;
+    while !rest.is_empty() {
+        if let Some(stripped) = rest.strip_prefix('<') {
+            let Some(end) = stripped.find('>') else {
+                break;
+            };
+            let name = tag_name(&stripped[..end]);
+            if name.eq_ignore_ascii_case("script") || name.eq_ignore_ascii_case("style") {
+                let close = format!("</{name}");
+                let search = &stripped[end + 1..];
+                if let Some(pos) = search
+                    .to_ascii_lowercase()
+                    .find(&close.to_ascii_lowercase())
+                {
+                    let after = &search[pos + close.len()..];
+                    rest = after.find('>').map(|at| &after[at + 1..]).unwrap_or("");
+                    continue;
+                }
+            }
+            if is_block_tag(&name) && !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            rest = &stripped[end + 1..];
+            continue;
+        }
+        if let Some((ch, used)) = html_entity(rest) {
+            out.push(ch);
+            rest = &rest[used..];
+            continue;
+        }
+        let ch = rest.chars().next().unwrap_or('\u{0}');
+        out.push(ch);
+        rest = &rest[ch.len_utf8()..];
+    }
+    out.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn tag_name(tag: &str) -> String {
+    tag.trim()
+        .trim_start_matches('/')
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn is_block_tag(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "p" | "div"
+            | "br"
+            | "li"
+            | "tr"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "pre"
+            | "blockquote"
+            | "ul"
+            | "ol"
+    )
+}
+
+fn html_entity(text: &str) -> Option<(char, usize)> {
+    let body = text.strip_prefix('&')?;
+    let end = body.find(';')?;
+    let name = &body[..end];
+    let ch = match name {
+        "amp" => '&',
+        "lt" => '<',
+        "gt" => '>',
+        "quot" => '"',
+        "apos" | "#39" => '\'',
+        "nbsp" => '\u{00a0}',
+        _ if let Some(hex) = name.strip_prefix("#x").or_else(|| name.strip_prefix("#X")) => {
+            char::from_u32(u32::from_str_radix(hex, 16).ok()?)?
+        }
+        _ if let Some(dec) = name.strip_prefix('#') => char::from_u32(dec.parse().ok()?)?,
+        _ => return None,
+    };
+    Some((ch, end + 2))
+}
+
+/// Windows HTML clipboard bytes. Offsets are UTF-8 byte positions of the fragment.
+fn html_clipboard_document(fragment: &str) -> Vec<u8> {
+    const PREFIX: &str = "<html>\r\n<body>\r\n<!--StartFragment-->";
+    const SUFFIX: &str = "<!--EndFragment-->\r\n</body>\r\n</html>";
+    const HEADER: &str = "Version:0.9\r\nStartHTML:0000000000\r\nEndHTML:0000000000\r\nStartFragment:0000000000\r\nEndFragment:0000000000\r\n";
+    let start_html = HEADER.len();
+    let start_fragment = start_html + PREFIX.len();
+    let end_fragment = start_fragment + fragment.len();
+    let end_html = end_fragment + SUFFIX.len();
+    let mut bytes = format!(
+        "Version:0.9\r\nStartHTML:{start_html:010}\r\nEndHTML:{end_html:010}\r\nStartFragment:{start_fragment:010}\r\nEndFragment:{end_fragment:010}\r\n"
+    )
+    .into_bytes();
+    debug_assert_eq!(bytes.len(), HEADER.len());
+    bytes.extend_from_slice(PREFIX.as_bytes());
+    bytes.extend_from_slice(fragment.as_bytes());
+    bytes.extend_from_slice(SUFFIX.as_bytes());
+    bytes.push(0);
+    bytes
+}
+
+fn html_format_id() -> Result<u32, String> {
+    use std::sync::OnceLock;
+    use windows::core::PCWSTR;
+    use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
+    static FORMAT: OnceLock<u32> = OnceLock::new();
+    if let Some(id) = FORMAT.get() {
+        return Ok(*id);
+    }
+    let name: Vec<u16> = "HTML Format"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let id = unsafe { RegisterClipboardFormatW(PCWSTR(name.as_ptr())) };
+    if id == 0 {
+        return Err("could not register the HTML clipboard format".into());
+    }
+    let _ = FORMAT.set(id);
+    Ok(id)
+}
+
+fn global_copy(bytes: &[u8]) -> Result<windows::Win32::Foundation::HGLOBAL, String> {
+    use windows::Win32::Foundation::GlobalFree;
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    unsafe {
+        let handle = GlobalAlloc(GMEM_MOVEABLE, bytes.len()).map_err(|err| err.to_string())?;
+        let locked = GlobalLock(handle);
+        if locked.is_null() {
+            let _ = GlobalFree(Some(handle));
+            return Err("could not lock clipboard memory".into());
+        }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), locked.cast(), bytes.len());
+        let _ = GlobalUnlock(handle);
+        Ok(handle)
+    }
+}
+
+fn write_rich_clipboard(plain: &str, html: &str) -> Result<(), String> {
+    use windows::Win32::Foundation::GlobalFree;
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    let mut wide = Vec::new();
+    for unit in plain.encode_utf16().chain(std::iter::once(0)) {
+        wide.extend_from_slice(&unit.to_ne_bytes());
+    }
+    let html_bytes = html_clipboard_document(html);
+    let format = html_format_id()?;
+    unsafe {
+        let text_handle = global_copy(&wide)?;
+        let html_handle = match global_copy(&html_bytes) {
+            Ok(handle) => handle,
+            Err(error) => {
+                let _ = GlobalFree(Some(text_handle));
+                return Err(error);
+            }
+        };
+        if let Err(error) = OpenClipboard(None) {
+            let _ = GlobalFree(Some(text_handle));
+            let _ = GlobalFree(Some(html_handle));
+            return Err(error.to_string());
+        }
+        let _ = EmptyClipboard();
+        if SetClipboardData(13u32, Some(as_handle(text_handle))).is_err() {
+            let _ = GlobalFree(Some(text_handle));
+            let _ = GlobalFree(Some(html_handle));
+            let _ = CloseClipboard();
+            return Err("could not set clipboard text".into());
+        }
+        if SetClipboardData(format, Some(as_handle(html_handle))).is_err() {
+            let _ = GlobalFree(Some(html_handle));
+            let _ = CloseClipboard();
+            return Err("could not set clipboard html".into());
+        }
+        let _ = CloseClipboard();
+    }
+    Ok(())
+}
+
 fn read_clipboard() -> Result<String, String> {
     use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
     use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
@@ -2387,12 +3284,147 @@ mod policy_tests {
     use super::app_allowed;
 
     #[test]
+    fn observation_waits_for_a_quiet_screen_and_stops_at_six_seconds() {
+        let quiet = super::StateSample {
+            busy: false,
+            signature: 7,
+        };
+        assert_eq!(super::observation_wait_ms(0, &[quiet, quiet]), 1200);
+        assert_eq!(
+            super::observation_wait_ms(
+                6000,
+                &[super::StateSample {
+                    busy: true,
+                    signature: 1
+                }]
+            ),
+            0
+        );
+        let busy = super::StateSample {
+            busy: true,
+            signature: 1,
+        };
+        assert_eq!(super::observation_wait_ms(0, &[busy; 30]), 6000);
+        assert_eq!(
+            super::observation_wait_ms(
+                0,
+                &[
+                    super::StateSample {
+                        busy: false,
+                        signature: 1
+                    },
+                    super::StateSample {
+                        busy: false,
+                        signature: 2
+                    },
+                    super::StateSample {
+                        busy: false,
+                        signature: 2
+                    },
+                ]
+            ),
+            1400
+        );
+        let settled = super::StateSample {
+            busy: false,
+            signature: 3,
+        };
+        assert_eq!(super::observation_wait_ms(2500, &[settled, settled]), 200);
+        assert!(!super::range_is_busy(Some(100.0), Some(100.0)));
+        assert!(super::range_is_busy(Some(40.0), Some(100.0)));
+        assert!(super::range_is_busy(None, None));
+        assert!(super::class_looks_busy("msctls_progress32"));
+        assert!(super::class_looks_busy("ProgressRing"));
+        assert!(super::class_looks_busy("BusyIndicator"));
+        assert!(!super::class_looks_busy("ScrollBar"));
+    }
+
+    #[test]
     fn a_covered_point_belongs_to_the_same_window_family() {
         assert!(super::same_window_family(10, 10, 10, 10));
         assert!(super::same_window_family(10, 22, 10, 10));
         assert!(super::same_window_family(10, 9, 9, 9));
         assert!(!super::same_window_family(10, 40, 10, 40));
         assert!(!super::same_window_family(10, 0, 10, 0));
+    }
+
+    #[test]
+    fn a_covered_point_names_the_window_in_front_and_asks_for_one_retry() {
+        let with_shot = super::covered_message(
+            10,
+            4,
+            5,
+            "StartMenuExperienceHost.exe",
+            "Start",
+            Some("ph-3"),
+        );
+        assert!(with_shot.contains("StartMenuExperienceHost.exe"));
+        assert!(with_shot.contains("Start menu"));
+        assert!(with_shot.contains("ph-3"));
+        assert!(with_shot.contains("once"));
+        assert!(with_shot.contains("No input was sent"));
+        let fresh = super::covered_message(10, 4, 5, "notepad.exe", "Untitled", None);
+        assert!(fresh.contains("get_window_state"));
+        assert!(!fresh.contains("Start menu"));
+        assert_eq!(
+            super::executable_name(r"C:\Windows\System32\StartMenuExperienceHost.exe"),
+            "StartMenuExperienceHost.exe"
+        );
+        assert_eq!(super::executable_name(""), "unknown");
+        let refusal = serde_json::json!({
+            "acted": false,
+            "reason": "covered",
+            "point": [4, 5],
+            "window_id": 10,
+            "covering": {"hwnd": 40, "title": "Start", "process": "StartMenuExperienceHost.exe"},
+            "message": with_shot,
+            "screenshot": {"id": "ph-3", "png_base64": "QUJD"},
+            "screenshots": [{"id": "ph-3", "url": "data:image/png;base64,QUJD"}]
+        });
+        assert!(super::is_covered_refusal(&refusal));
+        let compact = super::batch_covered_result(&refusal);
+        assert!(compact.get("screenshot").is_none());
+        assert!(compact.get("screenshots").is_none());
+        assert!(compact["message"]
+            .as_str()
+            .unwrap()
+            .contains("get_window_state"));
+        assert!(!compact["message"].as_str().unwrap().contains("ph-3"));
+    }
+
+    #[test]
+    fn paste_formats_build_rich_clipboard_bytes_without_touching_the_clipboard() {
+        assert_eq!(super::paste_format(&serde_json::json!({})).unwrap(), "text");
+        assert_eq!(
+            super::paste_format(&serde_json::json!({"format": "markdown"})).unwrap(),
+            "md"
+        );
+        assert!(super::paste_format(&serde_json::json!({"format": "rtf"})).is_err());
+        let bytes = super::html_clipboard_document("<b>ç</b>");
+        let text = std::str::from_utf8(&bytes[..bytes.len() - 1]).unwrap();
+        let start = header_offset(text, "StartFragment:");
+        let end = header_offset(text, "EndFragment:");
+        assert_eq!(&text.as_bytes()[start..end], "<b>ç</b>".as_bytes());
+        let html = super::markdown_to_html(
+            "# Title\n\n**bold** and `x < y`\n\n- one\n\n[ok](https://example.com)\n[bad](javascript:alert(1))\n\n```\n<tag>\n```\n",
+        );
+        assert!(html.contains("<h1>Title</h1>"));
+        assert!(html.contains("<strong>bold</strong>"));
+        assert!(html.contains("<code>x &lt; y</code>"));
+        assert!(html.contains("<li>one</li>"));
+        assert!(html.contains("href=\"https://example.com\""));
+        assert!(html.contains("<pre><code>&lt;tag&gt;\n</code></pre>"));
+        assert!(!html.to_ascii_lowercase().contains("javascript:"));
+        let plain = super::html_to_plain("<p>Hello<br>there</p><script>bad()</script>");
+        assert!(plain.contains("Hello"));
+        assert!(plain.contains("there"));
+        assert!(!plain.contains("bad"));
+        assert!(!plain.contains("<p>"));
+    }
+
+    fn header_offset(text: &str, key: &str) -> usize {
+        let line = text.lines().find(|line| line.starts_with(key)).unwrap();
+        line[key.len()..].trim().parse().unwrap()
     }
 
     #[test]

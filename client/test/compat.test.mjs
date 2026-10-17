@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeParams, presentPayload } from "../dist/compat.js";
+import { coveredRefusal, normalizeParams, presentPayload } from "../dist/compat.js";
 test("window2 target and click aliases reach the host without mutating arguments", () => {
  const input = { window: { id: 42, app: "paint" }, mouse_button: "r", click_count: 2 };
  const result = normalizeParams("click", input);
@@ -38,6 +38,22 @@ test("screenshotId is trimmed and image bytes stay out of the text payload", () 
  assert.deepEqual(many.images, ["QUJD", "REVG"]);
  assert.equal(JSON.parse(many.text).screenshots[1].originX, -1920);
  assert.equal(JSON.parse(many.text).screenshots[1].url, undefined);
+});
+
+test("a covered pointer refusal stays an error and still exposes its screenshot", () => {
+ const value = {
+  acted: false,
+  reason: "covered",
+  message: "Point (1, 2) is over notepad.exe, not window 9. No input was sent.",
+  screenshot: { id: "ph-4", png_base64: "QUJD", scale: 0.5 },
+  screenshots: [{ id: "ph-4", url: "data:image/png;base64,QUJD", originX: 0, originY: 0 }],
+ };
+ assert.equal(coveredRefusal(value), true);
+ assert.equal(coveredRefusal({ clicked: [1, 2] }), false);
+ const payload = presentPayload(value);
+ assert.equal(payload.images[0], "QUJD");
+ assert.equal(JSON.parse(payload.text).screenshot.png_base64, undefined);
+ assert.match(JSON.parse(payload.text).message, /No input was sent/);
 });
 
 test("malformed targets cannot silently become global screen input", () => {

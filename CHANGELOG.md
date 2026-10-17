@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.2.0-alpha.4
+
+- When a pointer point stays under a different window, name that process and return a fresh screenshot of the target. No input is sent. Retry the action once with the new `screenshotId`. A batch stops and leaves the image for `get_window_state`.
+- `paste` accepts `format` `text`, `md`, or `html`. Markdown and HTML also place the Windows HTML clipboard format. Plain text remains available. Links are limited to http, https, and mailto.
+- After a recent action, `get_window_state` and `screenshot` wait about 1 second, and up to 5 seconds more while a progress indicator is visible or the layout is still changing. The result includes `waited_ms`. Escape still cancels the wait.
+
+These changes are included in Alpha 4. The existing v0.2.0-alpha.3 download remains unchanged.
+
 ## v0.2.0-alpha.3
 
 - Capture a covered window from its own pixels when Windows graphics capture is available. The shot is labeled `capture: window` and does not raise the window. Pointer actions bring that window forward and refuse a point that stays covered. If window capture is unavailable, the shot is labeled `capture: visible` and may raise the window.

@@ -4,7 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 import { ComputerUseHost } from "./host.js";
-import { normalizeParams, presentPayload } from "./compat.js";
+import { coveredRefusal, normalizeParams, presentPayload } from "./compat.js";
 import { shapePoints } from "./shapes.js";
 
 const host = new ComputerUseHost(ComputerUseHost.locate());
@@ -33,7 +33,10 @@ function present(value: unknown): ToolResult {
 
 async function run(method: string, params: unknown, timeoutMs = 20_000): Promise<ToolResult> {
   try {
-    return present(await host.call(method, normalizeParams(method, params), timeoutMs));
+    const value = await host.call(method, normalizeParams(method, params), timeoutMs);
+    const presented = present(value);
+    if (coveredRefusal(value)) return { ...presented, isError: true };
+    return presented;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { content: [{ type: "text", text: message }], isError: true };
@@ -136,7 +139,8 @@ server.registerTool(
       "capture is \"window\" or \"visible\". visible means graphics capture was unavailable, so the image is the desktop and the window may be raised. " +
       "A window that crosses monitors also returns one screenshot per monitor intersection. Owned popups are separate regions. " +
       "Pass a region's screenshotId to click, drag, scroll, or move. x and y are physical pixels inside that region, not image pixels: divide image pixels by scale. " +
-      "The id must belong to the latest capture, and the window or popup must still be where it was captured.",
+      "The id must belong to the latest capture, and the window or popup must still be where it was captured. " +
+      "After a recent action the host waits about 1 second, and up to 5 seconds more while a progress indicator is visible or the layout is still changing. Do not insert your own delay. The result includes waited_ms.",
     inputSchema: {
       ...target,
       include_screenshot: z.boolean().optional(),
@@ -150,7 +154,7 @@ server.registerTool(
 server.registerTool(
   "click",
   {
-    description: "Click an accessibility element, a point inside a window, or a screen point. button is left, right, or middle. screenshotId selects a window, monitor slice, owned popup, or monitor screenshot. x and y are physical pixels inside that region. A pointer action brings the target window forward and stops if a different window still covers the point.",
+    description: "Click an accessibility element, a point inside a window, or a screen point. button is left, right, or middle. screenshotId selects a window, monitor slice, owned popup, or monitor screenshot. x and y are physical pixels inside that region. A pointer action brings the target window forward. If a different window still covers the point, no input is sent: the error names that process and includes a fresh screenshot of the target when capture works. Retry the input once with that new screenshotId. Do not click the covering window.",
     inputSchema: {
       ...point,
       button: z.enum(["left", "right", "middle"]).optional(),
@@ -166,7 +170,7 @@ server.registerTool(
 server.registerTool(
   "draw",
   {
-    description: "Hold the left button and trace a polyline. points are [x, y] pairs, window pixels when window_id is set. Use this for freehand drawing.",
+    description: "Hold the left button and trace a polyline. points are [x, y] pairs, window pixels when window_id is set. Use this for freehand drawing. If another window covers the first point, the stroke is not sent. Retry once with the fresh target screenshot in the error.",
     inputSchema: {
       ...target,
       points: z.array(z.tuple([z.number().int(), z.number().int()])).min(2),
@@ -182,7 +186,8 @@ server.registerTool(
     description:
       "Draw a geometric shape with the left button held: line, ellipse (use equal width and height for a circle), " +
       "rectangle, polygon, star, heart, spiral, or zigzag. cx,cy is the centre; width/height are the bounding size. " +
-      "Coordinates are window pixels when window_id is set. Select a pen or brush in the app first.",
+      "Coordinates are window pixels when window_id is set. Select a pen or brush in the app first. " +
+      "If another window covers the start point, the shape is not drawn. Retry once with the fresh target screenshot in the error.",
     inputSchema: {
       shape: z.enum(["line", "ellipse", "rectangle", "polygon", "star", "heart", "spiral", "zigzag"]),
       cx: z.number().int(),
@@ -215,7 +220,7 @@ server.registerTool(
 );
 
 server.registerTool("draw_strokes", {
-  description: "Trace up to 2000 independent straight strokes in one target window. Each stroke is [x1,y1,x2,y2] in window pixels. Select the pen and color first. Escape interrupts and releases the button.",
+  description: "Trace up to 2000 independent straight strokes in one target window. Each stroke is [x1,y1,x2,y2] in window pixels. Select the pen and color first. Escape interrupts and releases the button. If another window covers the first point, no stroke is sent. Retry once with the fresh target screenshot in the error.",
   inputSchema: {
     ...target,
     strokes: z.array(z.tuple([z.number().int(),z.number().int(),z.number().int(),z.number().int()])).min(1).max(2000),
@@ -231,7 +236,8 @@ server.registerTool(
     description:
       "Screenshot of the whole desktop or a region. screenshots[0] is the combined virtual desktop, or the requested region. " +
       "Each other monitor is a later entry with its own origin. Pass that screenshotId to click, drag, scroll, or move. " +
-      "x and y are physical pixels inside that region. screen = originX + x. Divide image pixels by scale first.",
+      "x and y are physical pixels inside that region. screen = originX + x. Divide image pixels by scale first. " +
+      "After a recent action the host waits about 1 second, and up to 5 seconds more while a progress indicator is visible or the layout is still changing. Do not insert your own delay. The result includes waited_ms.",
     inputSchema: {
       scale: z.number().optional().describe("Longest-edge scale, capped so the image stays under 1568px. Default 0.5."),
       region: z.tuple([z.number().int(), z.number().int(), z.number().int(), z.number().int()]).optional(),
@@ -243,7 +249,7 @@ server.registerTool(
 server.registerTool(
   "move",
   {
-    description: "Move the pointer without clicking. screenshotId selects a window, monitor slice, owned popup, or monitor screenshot. x and y are physical pixels inside that region. Without it, they are window pixels when window_id is set, otherwise screen pixels.",
+    description: "Move the pointer without clicking. screenshotId selects a window, monitor slice, owned popup, or monitor screenshot. x and y are physical pixels inside that region. Without it, they are window pixels when window_id is set, otherwise screen pixels. If a different window still covers the point, the pointer does not move there. Retry once with the fresh target screenshotId in the error.",
     inputSchema: { ...point },
   },
   async (args) => run("move", args),
@@ -252,7 +258,7 @@ server.registerTool(
 server.registerTool(
   "drag",
   {
-    description: "Drag with the left button. With screenshotId, from_x and from_y must lie inside that region. to_x and to_y use the same origin and may leave the region, including onto another monitor. Without it, coordinates are window pixels when window_id is set, otherwise screen pixels. The region must be from the latest capture and still in place.",
+    description: "Drag with the left button. With screenshotId, from_x and from_y must lie inside that region. to_x and to_y use the same origin and may leave the region, including onto another monitor. Without it, coordinates are window pixels when window_id is set, otherwise screen pixels. The region must be from the latest capture and still in place. If a different window covers the start point, the drag is not sent. Retry once with the fresh target screenshotId in the error.",
     inputSchema: {
       ...target,
       from_x: z.number().int(),
@@ -268,7 +274,7 @@ server.registerTool(
 server.registerTool(
   "scroll",
   {
-    description: "Move to a point and scroll. Positive scrollY moves the page down. Positive scrollX moves right. With screenshotId, x and y are physical pixels inside that window, monitor slice, owned popup, or monitor. The region must be from the latest capture and still in place.",
+    description: "Move to a point and scroll. Positive scrollY moves the page down. Positive scrollX moves right. With screenshotId, x and y are physical pixels inside that window, monitor slice, owned popup, or monitor. The region must be from the latest capture and still in place. If a different window covers the point, the wheel is not sent. Retry once with the fresh target screenshotId in the error.",
     inputSchema: {
       ...point,
       scrollX: z.number().int().optional(),
@@ -332,9 +338,10 @@ server.registerTool(
 server.registerTool(
   "paste",
   {
-    description: "Write text to the clipboard and press Ctrl+V. The previous clipboard contents stay replaced.",
+    description: "Write the clipboard and press Ctrl+V. format is text (default), md, or html. md and html also place Windows HTML Format so an editor can paste headings, lists, and links. text and md keep the source as plain text. html's plain fallback has the tags removed. The previous clipboard stays replaced.",
     inputSchema: {
       text: z.string(),
+      format: z.enum(["text", "md", "html"]).optional(),
       ...target,
     },
   },
@@ -363,7 +370,7 @@ server.registerTool(
   "batch",
   {
     description:
-      "Run up to 50 actions in order and stop at the first error. " +
+      "Run up to 50 actions in order and stop at the first error. A covered point stops the batch without sending that input; call get_window_state and retry once. " +
       "Actions: click, double_click, right_click, move, drag, draw, scroll, type, key, set_value, secondary, paste, focus_window, wait. " +
       "Input waits until the user has been idle, and Escape stops further actions.",
     inputSchema: {

@@ -44,6 +44,12 @@ function imageBytes(value: unknown): string | undefined {
   return at >= 0 ? value.slice(at + marker.length) : value;
 }
 
+/** A pointer action that refused to click a different window. The image, when present, is the target. */
+export function coveredRefusal(value: unknown): boolean {
+  const record = asRecord(value);
+  return record?.acted === false && record?.reason === "covered";
+}
+
 /** Drop raw image bytes from the JSON text. The caller attaches every region PNG. */
 export function presentPayload(value: unknown): { text: string; pngBase64?: string; images: string[] } {
   const record = asRecord(value);

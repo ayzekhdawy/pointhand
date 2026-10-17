@@ -58,7 +58,7 @@ PointHand reproduced the Mona Lisa in Microsoft Paint through its own MCP server
 
 The TypeScript MCP server connects your agent to a native Rust host. Windows input, accessibility and the overlay run in that host. The portable package needs **Node.js 20+**; Rust and Python are only needed for development or optional components.
 
-**Release status:** **v0.2.0-alpha.3** is an alpha for supervised workflows with 26 MCP tools. A covered window can be captured from its own pixels, and pointer actions bring that window forward. See the [release notes](docs/releases/alpha-3.md) and [validation limits](docs/release-checklist.md). Alpha 2 remains available.
+**Release status:** **v0.2.0-alpha.4** is an alpha for supervised workflows with 26 MCP tools. A covered pointer point is refused with a fresh target screenshot, paste can carry formatted text, and the next screenshot waits for the screen to settle. See the [release notes](docs/releases/alpha-4.md) and [validation limits](docs/release-checklist.md). Alpha 3 remains available.
 
 ## Quick start
 
@@ -95,7 +95,7 @@ For the complete portrait workflow, follow the [Mona Lisa tutorial](examples/mon
 - **Scoped access:** restrict receiving apps with executable names or exact paths in `POINTHAND_ALLOW`.
 - **Input cleanup:** interrupted strokes release held buttons. Alpha 2 also provides an out-of-band `emergency_stop` tool that stops active and queued mutations until restart.
 
-Use PointHand in a supervised desktop session. App permissions are a guardrail, not a sandbox against malicious local software. Window screenshots use the window's own pixels when Windows graphics capture is available, so a covered window stays where it is. Pointer actions bring that window forward and do not click a window that remains on top. Desktop screenshots are the visible composite. Elevated windows can still reject input. Read the [security policy](SECURITY.md) and [input behavior guide](docs/input-behavior.md).
+Use PointHand in a supervised desktop session. App permissions are a guardrail, not a sandbox against malicious local software. Window screenshots use the window's own pixels when Windows graphics capture is available, so a covered window stays where it is. Pointer actions bring that window forward and do not click a window that remains on top. That refusal names the covering process and returns a fresh screenshot of the target so the action can be retried once. Desktop screenshots are the visible composite. Elevated windows can still reject input. Read the [security policy](SECURITY.md) and [input behavior guide](docs/input-behavior.md).
 
 ## Tested on the desktop
 

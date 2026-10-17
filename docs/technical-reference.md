@@ -24,7 +24,13 @@ bring the window forward. Each region is labeled `capture: "window"` or
 `capture: "visible"`. The visible label means graphics capture was unavailable,
 so the image is the desktop composite and the window may be raised. Desktop and
 monitor screenshots stay the visible composite. Pointer actions bring the target
-window forward and refuse a point that a different window still covers.
+window forward. If a different window still covers the point, no input is sent.
+The result names that process, including the Start menu when it is
+`StartMenuExperienceHost.exe`, and includes a fresh screenshot of the target
+when capture works. Retry that input once with the new `screenshotId`. The host
+line stays `ok: true` with `acted: false` so the screenshot travels with the
+refusal. The MCP tool reports that result as an error. A batch stops there and
+omits the image bytes; call `get_window_state`, then retry once.
 
 ## What the agent can call
 `list_apps`, `list_windows`, `get_window`, `launch_app`, `activate_window`,
@@ -60,11 +66,15 @@ also requires the virtual screen to be unchanged. The id does not turn image
 pixels into region pixels. Positive `scrollY` moves the page down. Window
 records include a `monitors` array with each touched display and the overlap.
 
+After a recent action, `get_window_state` and `screenshot` wait about 1 second before reading the screen. If a progress indicator is visible, or the window rectangle or layout is still changing, the wait continues in 200 ms steps for up to 5 more seconds. The result field is `waited_ms`. A finished progress bar does not keep the wait open. The agent should not add its own pause. The wait is not the idle gate: it does not require the pointer to stay still, and physical Escape still cancels it. A covered-point refusal does not start this clock.
+
 `batch` runs up to 50 actions and stops at the first error. The Rust host
 accepts `click`, `double_click`, `right_click`, `move`, `drag`, `draw`, `scroll`,
 `type`, `key`, `set_value`, `secondary`, `paste`, `focus_window`, and `wait`.
 
 Key names include `Return`, `Control_L+a`, `KP_0`, `page_up`, and `super`.
+
+`paste` takes `format`: `text` (default), `md`, or `html`. `text` places Unicode text and presses Ctrl+V. `md` and `html` also place the Windows `HTML Format` clipboard value, so a document or slide editor can paste headings, lists, emphasis, and links. The plain-text value stays the markdown source, or the tag-stripped HTML. Supported markdown is headings, paragraphs, `-` and `*` lists, numbered lists, `` `code` ``, fenced code, `**bold**`, `*italic*`, and links. A link is kept only when its target is `http`, `https`, or `mailto`. The previous clipboard contents stay replaced. A paste is limited to 200000 characters.
 
 ## Safety
 An agent with a mouse and keyboard can do anything you can. Treat on-screen
