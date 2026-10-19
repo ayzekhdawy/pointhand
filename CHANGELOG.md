@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v0.2.0-alpha.5
+
+- Accessibility lines list only the secondary actions that element can run. Scroll labels are omitted at the end of that axis.
+- `start_audio_recording` and `stop_audio_recording` record speaker loopback as a 24 kHz stereo WAV. The default limit is 60 seconds and the maximum is 300 seconds. Other actions continue. Physical Escape ends capture early, and stop returns the partial file. A quiet stretch stays in the file as silence.
+
+These changes are included in Alpha 5. The existing v0.2.0-alpha.4 download remains unchanged.
+
 ## v0.2.0-alpha.4
 
 - When a pointer point stays under a different window, name that process and return a fresh screenshot of the target. No input is sent. Retry the action once with the new `screenshotId`. A batch stops and leaves the image for `get_window_state`.

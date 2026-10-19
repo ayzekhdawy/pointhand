@@ -7,8 +7,8 @@ Implementation details and API conventions for the current alpha. See the [chang
 ## Layout
 | Piece | Role |
 | --- | --- |
-| `client/` | TypeScript MCP server. Speaks JSON-lines to the host and returns PNG tool results as images. |
-| `host/` | `pointhand-computer-use.exe`. Windows, input, screenshots, accessibility, clipboard, idle guard, allow-list, Escape stop, native overlay. |
+| `client/` | TypeScript MCP server. Speaks JSON-lines to the host and returns PNG tool results as images and WAV tool results as audio. |
+| `host/` | `pointhand-computer-use.exe`. Windows, input, screenshots, accessibility, clipboard, speaker loopback, idle guard, allow-list, Escape stop, native overlay. |
 | `pointhand/` | Python MCP server. Optional reference implementation with its own Python overlay. |
 | `scripts/` | `build-windows.ps1` (build + manifest), `mcp-smoke.mjs` (talk to the server like a real client). |
 
@@ -36,8 +36,9 @@ omits the image bytes; call `get_window_state`, then retry once.
 `list_apps`, `list_windows`, `get_window`, `launch_app`, `activate_window`,
 `get_window_state`, `screenshot`, `click`, `move`, `drag`, `draw`, `draw_shape`,
 `scroll`, `type_text`, `press_key`, `set_value`, `perform_secondary_action`,
-`paste`, `clipboard_read`, `clipboard_write`, `batch`, `overlay_status`,
-`guard_status`, `get_system_info`, `draw_strokes`, `emergency_stop`.
+`paste`, `clipboard_read`, `clipboard_write`, `start_audio_recording`,
+`stop_audio_recording`, `batch`, `overlay_status`, `guard_status`,
+`get_system_info`, `draw_strokes`, `emergency_stop`.
 
 `emergency_stop` is available in Alpha 2: it interrupts active
 input without waiting for the request queue. Restart the MCP server to resume.
@@ -50,7 +51,10 @@ captures the whole desktop or a `[left, top, right, bottom]` region.
 `get_window_state` can include a PNG and an accessibility object. The object
 always has `tree` when text was requested, and adds `focused_element`,
 `selected_elements`, `document_text`, or `selected_text` when UI Automation
-exposes them. Click an `element_index` from that tree, or a point. With
+exposes them. A line includes `actions="Invoke, Expand"` only for patterns that
+element can run. Scroll labels are left off at the end of that axis. Pass one
+of those labels to `perform_secondary_action`; matching ignores case. Click an
+`element_index` from that tree, or a point. With
 `window_id`, `x` and `y` are window pixels. Divide image pixels by
 `screenshot.scale`. Each captured region returns `screenshot.id` and a
 `screenshots` entry with that id, image size, screen origin, `zIndex`, `role`,
@@ -75,6 +79,8 @@ accepts `click`, `double_click`, `right_click`, `move`, `drag`, `draw`, `scroll`
 Key names include `Return`, `Control_L+a`, `KP_0`, `page_up`, and `super`.
 
 `paste` takes `format`: `text` (default), `md`, or `html`. `text` places Unicode text and presses Ctrl+V. `md` and `html` also place the Windows `HTML Format` clipboard value, so a document or slide editor can paste headings, lists, emphasis, and links. The plain-text value stays the markdown source, or the tag-stripped HTML. Supported markdown is headings, paragraphs, `-` and `*` lists, numbered lists, `` `code` ``, fenced code, `**bold**`, `*italic*`, and links. A link is kept only when its target is `http`, `https`, or `mailto`. The previous clipboard contents stay replaced. A paste is limited to 200000 characters.
+
+`start_audio_recording` records what Windows is playing through the default speaker. It is loopback, not a microphone, and it does not wait for the pointer to be idle. Other actions continue while it records. `max_duration_ms` defaults to 60000 and cannot exceed 300000. One recording at a time. `stop_audio_recording` returns a 24 kHz stereo 16-bit WAV. The host line includes a temp `filepath`, `bytes`, and `data_url`. The MCP tool attaches one `audio/wav` part and removes `bytes` and `data_url` from the text. A quiet stretch stays in the file as silence, so the duration matches how long capture ran. Physical Escape ends capture early; call `stop_audio_recording` to collect the partial file. The host drops an unfinished recording when it exits.
 
 ## Safety
 An agent with a mouse and keyboard can do anything you can. Treat on-screen

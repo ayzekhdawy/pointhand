@@ -2,8 +2,9 @@
 //!
 //! The TypeScript MCP server spawns this executable and speaks one JSON object
 //! per line. This process owns windows, input, the accessibility tree,
-//! screenshots, the idle guard, the allow-list, and the Escape stop.
+//! screenshots, the idle guard, the allow-list, loopback audio, and the Escape stop.
 
+mod audio;
 mod desktop;
 mod guard;
 mod keys;
@@ -134,6 +135,7 @@ fn main() {
             && request.method != "overlay_status"
             && request.method != "guard_status"
             && request.method != "get_system_info"
+            && request.method != "stop_audio_recording"
         {
             write_response(
                 &mut stdout,
@@ -173,6 +175,7 @@ fn main() {
         }
         write_response(&mut stdout, &response);
     }
+    audio::discard();
 }
 
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
@@ -270,6 +273,8 @@ fn dispatch(session: &mut Session, request: &Request) -> Result<Value, String> {
                 .ok_or("missing text")?,
         ),
         "launch_app" => session.launch(params.get("app").and_then(|v| v.as_str()).unwrap_or("")),
+        "start_audio_recording" => audio::start(params),
+        "stop_audio_recording" => audio::stop(),
         "batch" => session.batch(params.get("actions").cloned().unwrap_or(Value::Null)),
         "close" => Ok(json!({"bye": true})),
         other => Err(format!("unknown method {other}")),

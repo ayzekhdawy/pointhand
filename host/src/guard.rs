@@ -22,8 +22,18 @@ pub struct InputLock(HANDLE);
 impl InputLock {
     pub fn for_request(method: &str, params: &Value) -> Result<Option<Self>, String> {
         let input = match method {
-            "list_apps" | "list_windows" | "get_window" | "get_system_info" | "screenshot"
-            | "clipboard_read" | "overlay_status" | "guard_status" | "ping" | "close" => false,
+            "list_apps"
+            | "list_windows"
+            | "get_window"
+            | "get_system_info"
+            | "screenshot"
+            | "clipboard_read"
+            | "overlay_status"
+            | "guard_status"
+            | "ping"
+            | "close"
+            | "start_audio_recording"
+            | "stop_audio_recording" => false,
             "get_window_state" => params
                 .get("include_screenshot")
                 .and_then(|v| v.as_bool())

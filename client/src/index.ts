@@ -14,21 +14,17 @@ type ToolResult = {
   content: Array<
     | { type: "text"; text: string }
     | { type: "image"; data: string; mimeType: string }
+    | { type: "audio"; data: string; mimeType: string }
   >;
   isError?: boolean;
 };
 
 function present(value: unknown): ToolResult {
   const payload = presentPayload(value);
-  if (payload.images.length > 0) {
-    return {
-      content: [
-        { type: "text", text: payload.text },
-        ...payload.images.map((data) => ({ type: "image" as const, data, mimeType: "image/png" })),
-      ],
-    };
-  }
-  return { content: [{ type: "text", text: payload.text }] };
+  const content: ToolResult["content"] = [{ type: "text", text: payload.text }];
+  for (const data of payload.images) content.push({ type: "image", data, mimeType: "image/png" });
+  if (payload.audioBase64) content.push({ type: "audio", data: payload.audioBase64, mimeType: "audio/wav" });
+  return { content };
 }
 
 async function run(method: string, params: unknown, timeoutMs = 20_000): Promise<ToolResult> {
@@ -140,7 +136,8 @@ server.registerTool(
       "A window that crosses monitors also returns one screenshot per monitor intersection. Owned popups are separate regions. " +
       "Pass a region's screenshotId to click, drag, scroll, or move. x and y are physical pixels inside that region, not image pixels: divide image pixels by scale. " +
       "The id must belong to the latest capture, and the window or popup must still be where it was captured. " +
-      "After a recent action the host waits about 1 second, and up to 5 seconds more while a progress indicator is visible or the layout is still changing. Do not insert your own delay. The result includes waited_ms.",
+      "After a recent action the host waits about 1 second, and up to 5 seconds more while a progress indicator is visible or the layout is still changing. Do not insert your own delay. The result includes waited_ms. " +
+      "With include_text, a line lists actions=\"Invoke, Expand\" for the secondary actions that element can run.",
     inputSchema: {
       ...target,
       include_screenshot: z.boolean().optional(),
@@ -325,7 +322,7 @@ server.registerTool(
 server.registerTool(
   "perform_secondary_action",
   {
-    description: "Invoke, Expand, Collapse, Raise, or Scroll Up/Down/Left/Right on an accessibility element.",
+    description: "Run one actions= label from the latest accessibility tree: Invoke, Expand, Collapse, Raise, or Scroll Up, Scroll Down, Scroll Left, Scroll Right. Matching ignores case. Do not guess a label the tree did not list.",
     inputSchema: {
       ...target,
       element_index: z.number().int(),
@@ -364,6 +361,26 @@ server.registerTool(
     inputSchema: { text: z.string() },
   },
   async (args) => run("clipboard_write", args),
+);
+
+server.registerTool(
+  "start_audio_recording",
+  {
+    description: "Start recording what Windows is playing (speaker loopback, not the microphone) while other actions continue. max_duration_ms defaults to 60000 and cannot exceed 300000. One recording at a time. This does not wait for the pointer to be idle.",
+    inputSchema: {
+      max_duration_ms: z.number().int().positive().max(300000).optional(),
+    },
+  },
+  async (args) => run("start_audio_recording", args),
+);
+
+server.registerTool(
+  "stop_audio_recording",
+  {
+    description: "Stop the loopback recording and return a 24 kHz stereo WAV. The filepath is on this computer. Physical Escape ends capture early; call this to collect the partial recording.",
+    inputSchema: {},
+  },
+  async () => run("stop_audio_recording", {}, 60_000),
 );
 
 server.registerTool(

@@ -54,11 +54,11 @@ PointHand reproduced the Mona Lisa in Microsoft Paint through its own MCP server
 
 | Observe | Interact | Create |
 | :--- | :--- | :--- |
-| Find apps and windows, capture screenshots and inspect the UI Automation tree. | Move, click, drag, scroll, type, use key chords and work with the clipboard. | Draw freehand paths and geometric shapes with a native cursor and visible activity frame. |
+| Find apps and windows, capture screenshots, inspect the UI Automation tree, and record speaker loopback. | Move, click, drag, scroll, type, use key chords and work with the clipboard. | Draw freehand paths and geometric shapes with a native cursor and visible activity frame. |
 
 The TypeScript MCP server connects your agent to a native Rust host. Windows input, accessibility and the overlay run in that host. The portable package needs **Node.js 20+**; Rust and Python are only needed for development or optional components.
 
-**Release status:** **v0.2.0-alpha.4** is an alpha for supervised workflows with 26 MCP tools. A covered pointer point is refused with a fresh target screenshot, paste can carry formatted text, and the next screenshot waits for the screen to settle. See the [release notes](docs/releases/alpha-4.md) and [validation limits](docs/release-checklist.md). Alpha 3 remains available.
+**Release status:** **v0.2.0-alpha.5** is an alpha for supervised workflows with 28 MCP tools. Accessibility lines name only the actions an element can run, and `start_audio_recording` records what Windows is playing. See the [release notes](docs/releases/alpha-5.md) and [validation limits](docs/release-checklist.md). Alpha 4 remains available.
 
 ## Quick start
 

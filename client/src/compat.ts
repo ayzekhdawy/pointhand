@@ -50,13 +50,13 @@ export function coveredRefusal(value: unknown): boolean {
   return record?.acted === false && record?.reason === "covered";
 }
 
-/** Drop raw image bytes from the JSON text. The caller attaches every region PNG. */
-export function presentPayload(value: unknown): { text: string; pngBase64?: string; images: string[] } {
+/** Drop raw image and WAV bytes from the JSON text. The caller attaches each part. */
+export function presentPayload(value: unknown): { text: string; pngBase64?: string; images: string[]; audioBase64?: string } {
   const record = asRecord(value);
-  const shot = asRecord(record?.screenshot);
+  if (!record) return { text: JSON.stringify(value), images: [] };
+  const shot = asRecord(record.screenshot);
   const png = typeof shot?.png_base64 === "string" ? shot.png_base64 : undefined;
-  const shots = record?.screenshots;
-  if (!record || (!png && !Array.isArray(shots))) return { text: JSON.stringify(value), images: [] };
+  const shots = record.screenshots;
   const copy: Record<string, unknown> = { ...record };
   if (shot && png) {
     const next = { ...shot };
@@ -76,5 +76,11 @@ export function presentPayload(value: unknown): { text: string; pngBase64?: stri
     });
   }
   if (images.length === 0 && png) images.push(png);
-  return { text: JSON.stringify(copy), pngBase64: images[0], images };
+  let audioBase64: string | undefined;
+  if (typeof copy.data_url === "string" && copy.data_url.startsWith("data:audio/")) {
+    audioBase64 = imageBytes(copy.data_url);
+    delete copy.data_url;
+    delete copy.bytes;
+  }
+  return { text: JSON.stringify(copy), pngBase64: images[0], images, audioBase64 };
 }

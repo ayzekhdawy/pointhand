@@ -56,6 +56,23 @@ test("a covered pointer refusal stays an error and still exposes its screenshot"
  assert.match(JSON.parse(payload.text).message, /No input was sent/);
 });
 
+test("loopback audio bytes leave the text payload and stay one WAV", () => {
+ const payload = presentPayload({
+  filepath: "C:/Temp/pointhand-audio.wav",
+  bytes: "UklGRg==",
+  data_url: "data:audio/wav;base64,UklGRg==",
+  duration_ms: 1,
+  sample_rate: 24000,
+  channels: 2,
+ });
+ assert.equal(payload.audioBase64, "UklGRg==");
+ const text = JSON.parse(payload.text);
+ assert.equal(text.bytes, undefined);
+ assert.equal(text.data_url, undefined);
+ assert.equal(text.filepath, "C:/Temp/pointhand-audio.wav");
+ assert.equal(text.sample_rate, 24000);
+});
+
 test("malformed targets cannot silently become global screen input", () => {
  for(const window of [null, {}, [], "paint", {id:0}, {id:-1}, {id:1.5}]) {
   assert.throws(() => normalizeParams("click", {window,x:10,y:10}), /integer|valid/);

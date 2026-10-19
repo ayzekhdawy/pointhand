@@ -18,7 +18,7 @@ use uiautomation::patterns::{
     UIScrollPattern, UISelectionItemPattern, UITextPattern, UIValuePattern,
 };
 use uiautomation::screenshots::Screenshot;
-use uiautomation::types::{ControlType, Point, Rect};
+use uiautomation::types::{ControlType, ExpandCollapseState, Point, Rect};
 use uiautomation::{UIAutomation, UIElement, UITreeWalker};
 use windows::core::{BOOL, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
@@ -2322,6 +2322,91 @@ fn send_unicode_unit(unit: u16) -> Result<(), String> {
     Ok(())
 }
 
+/// Labels an agent can pass to `perform_secondary_action`. Scroll labels stop
+/// at the end of that axis. A negative percent means the position is unknown.
+fn action_labels(
+    invoke: bool,
+    expand: bool,
+    collapse: bool,
+    raise: bool,
+    vertical: Option<f64>,
+    horizontal: Option<f64>,
+) -> Option<String> {
+    let mut labels = Vec::new();
+    if invoke {
+        labels.push("Invoke");
+    }
+    if expand {
+        labels.push("Expand");
+    }
+    if collapse {
+        labels.push("Collapse");
+    }
+    if raise {
+        labels.push("Raise");
+    }
+    if let Some(percent) = vertical {
+        if percent != 0.0 {
+            labels.push("Scroll Up");
+        }
+        if percent < 0.0 || percent < 100.0 {
+            labels.push("Scroll Down");
+        }
+    }
+    if let Some(percent) = horizontal {
+        if percent != 0.0 {
+            labels.push("Scroll Left");
+        }
+        if percent < 0.0 || percent < 100.0 {
+            labels.push("Scroll Right");
+        }
+    }
+    if labels.is_empty() {
+        None
+    } else {
+        Some(labels.join(", "))
+    }
+}
+
+fn element_action_labels(element: &UIElement) -> Option<String> {
+    let mut expand = false;
+    let mut collapse = false;
+    if let Ok(pattern) = element.get_pattern::<UIExpandCollapsePattern>() {
+        match pattern.get_state().ok() {
+            Some(ExpandCollapseState::Collapsed) => expand = true,
+            Some(ExpandCollapseState::Expanded) => collapse = true,
+            Some(ExpandCollapseState::PartiallyExpanded) => {
+                expand = true;
+                collapse = true;
+            }
+            Some(ExpandCollapseState::LeafNode) | None => {}
+        }
+    }
+    let scroll = element.get_pattern::<UIScrollPattern>().ok();
+    let vertical = scroll.as_ref().and_then(|pattern| {
+        pattern
+            .is_vertically_scrollable()
+            .ok()
+            .filter(|scrollable| *scrollable)
+            .map(|_| pattern.get_vertical_scroll_percent().unwrap_or(-1.0))
+    });
+    let horizontal = scroll.as_ref().and_then(|pattern| {
+        pattern
+            .is_horizontally_scrollable()
+            .ok()
+            .filter(|scrollable| *scrollable)
+            .map(|_| pattern.get_horizontal_scroll_percent().unwrap_or(-1.0))
+    });
+    action_labels(
+        element.get_pattern::<UIInvokePattern>().is_ok(),
+        expand,
+        collapse,
+        element.get_pattern::<UIScrollItemPattern>().is_ok(),
+        vertical,
+        horizontal,
+    )
+}
+
 fn canonical(action: &str) -> Result<String, String> {
     let key = action
         .replace('_', " ")
@@ -2428,6 +2513,9 @@ fn format_node(element: &UIElement, index: usize, depth: usize) -> (String, bool
     }
     if !element.is_enabled().unwrap_or(true) {
         bits.push("disabled".into());
+    }
+    if let Some(actions) = element_action_labels(element) {
+        bits.push(format!("actions={actions:?}"));
     }
     (
         format!("{:indent$}{}", "", bits.join(" "), indent = depth * 2),
@@ -3282,6 +3370,26 @@ fn visit_shortcuts(dir: &PathBuf, needle: &str, found: &mut Vec<Value>) -> std::
 #[cfg(test)]
 mod policy_tests {
     use super::app_allowed;
+
+    #[test]
+    fn accessibility_lines_name_only_the_actions_that_can_run() {
+        assert_eq!(
+            super::action_labels(true, true, false, true, Some(0.0), Some(40.0)).as_deref(),
+            Some("Invoke, Expand, Raise, Scroll Down, Scroll Left, Scroll Right")
+        );
+        assert_eq!(
+            super::action_labels(false, false, true, false, Some(100.0), Some(0.0)).as_deref(),
+            Some("Collapse, Scroll Up, Scroll Right")
+        );
+        assert_eq!(
+            super::action_labels(false, false, false, false, Some(-1.0), None).as_deref(),
+            Some("Scroll Up, Scroll Down")
+        );
+        assert_eq!(
+            super::action_labels(false, false, false, false, None, None),
+            None
+        );
+    }
 
     #[test]
     fn observation_waits_for_a_quiet_screen_and_stops_at_six_seconds() {
