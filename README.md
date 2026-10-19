@@ -88,6 +88,25 @@ Open a blank Paint canvas and try:
 
 For the complete portrait workflow, follow the [Mona Lisa tutorial](examples/mona-lisa/README.md), including the reference, ready-made plan and script instructions.
 
+## Use with Grok App / Grok CLI
+
+PointHand is a plain stdio MCP server, so any MCP client can load it. [Grok App](https://github.com/RongleCat/grok-app) (and its GrokCLI fork) recognise it as a one-click preset:
+
+1. Download and extract this release ZIP, install Node.js 20+.
+2. In the app open **Settings → Extensions → MCP → Add server → Fill in PointHand**. Replace the sample path with your extracted `client/dist/index.js`, then press **Add**.
+3. Optional: **Install PointHand skill** writes [`skills/pointhand/SKILL.md`](skills/pointhand/SKILL.md) into the user skills folder so the agent knows the look → act → verify workflow. Terminal users can copy that file to `~/.grok/skills/pointhand/SKILL.md` and add the same config by hand:
+
+```toml
+[mcp_servers.pointhand]
+command = "node"
+args = ["C:/Tools/PointHand/client/dist/index.js"]
+
+[mcp_servers.pointhand.env]
+POINTHAND_ALLOW = "mspaint.exe"
+```
+
+Physical Escape still stops PointHand at any time. Full walkthrough: the Grok App docs once the companion PR lands, or the Quick start section above.
+
 ## Visible control. A clear way to stop.
 
 - **Native feedback:** a click-through glass frame, activity label, cursor trail and click ripple show PointHand's activity. The overlay targets 60 FPS and is excluded from screenshots by default.

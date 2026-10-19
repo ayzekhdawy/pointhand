@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Ship `skills/pointhand/SKILL.md` and a Grok App / Grok CLI setup section in the README.
+
 ## v0.2.0-alpha.5
 
 - Accessibility lines list only the secondary actions that element can run. Scroll labels are omitted at the end of that axis.
