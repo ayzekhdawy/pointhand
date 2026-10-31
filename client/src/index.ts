@@ -411,6 +411,7 @@ server.registerTool(
     inputSchema: {
       window_id: windowId,
       state: z.enum(["minimize", "maximize", "restore"]),
+      background: z.boolean().optional().describe("Minimize or restore without taking focus from the user. Maximize always activates."),
     },
   },
   async (args) => run("set_window_state", args),
@@ -428,6 +429,7 @@ server.registerTool(
       y: z.number().int().optional(),
       width: z.number().int().positive().optional(),
       height: z.number().int().positive().optional(),
+      background: z.boolean().optional().describe("Skip the idle wait and restore a minimized window without taking focus."),
     },
   },
   async (args) => run("move_window", args),

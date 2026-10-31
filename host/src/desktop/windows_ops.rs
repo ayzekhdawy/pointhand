@@ -18,10 +18,11 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     IsIconic, IsWindow, IsZoomed, PostMessageW, SetWindowPos, ShowWindow, SWP_NOACTIVATE,
-    SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, WM_CLOSE,
+    SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE,
+    WM_CLOSE,
 };
 
-use super::{describe, executable_name, note_action, virtual_screen, Session};
+use super::{describe, executable_name, note_action, virtual_screen, wants_background, Session};
 
 /// Session-critical processes. Closing one would break the desktop, so
 /// `close_window` refuses them even when the allow-list is empty.
@@ -56,13 +57,18 @@ impl Session {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        let command = match state.as_str() {
-            "minimize" | "minimized" => SW_MINIMIZE,
-            "maximize" | "maximized" => SW_MAXIMIZE,
-            "restore" | "normal" => SW_RESTORE,
+        let background = wants_background(params);
+        // Background mode minimizes and restores without taking activation.
+        // Windows has no inactive maximize, so maximize still activates.
+        let command = match (state.as_str(), background) {
+            ("minimize" | "minimized", false) => SW_MINIMIZE,
+            ("minimize" | "minimized", true) => SW_SHOWMINNOACTIVE,
+            ("maximize" | "maximized", _) => SW_MAXIMIZE,
+            ("restore" | "normal", false) => SW_RESTORE,
+            ("restore" | "normal", true) => SW_SHOWNOACTIVATE,
             _ => return Err("state must be minimize, maximize, or restore".into()),
         };
-        self.guard_input(window_id)?;
+        self.guard_mutation(window_id, background)?;
         crate::check_running()?;
         let handle = hwnd(window_id);
         unsafe {
@@ -82,13 +88,19 @@ impl Session {
         let width = optional_int(params, "width")?.unwrap_or(info.right - info.left);
         let height = optional_int(params, "height")?.unwrap_or(info.bottom - info.top);
         check_placement(x, y, width, height, virtual_screen())?;
-        self.guard_input(window_id)?;
+        let background = wants_background(params);
+        self.guard_mutation(window_id, background)?;
         crate::check_running()?;
         let handle = hwnd(window_id);
         unsafe {
             // A maximized or minimized window ignores the new rectangle.
             if IsZoomed(handle).as_bool() || IsIconic(handle).as_bool() {
-                let _ = ShowWindow(handle, SW_RESTORE);
+                let restore = if background {
+                    SW_SHOWNOACTIVATE
+                } else {
+                    SW_RESTORE
+                };
+                let _ = ShowWindow(handle, restore);
             }
             SetWindowPos(
                 handle,
@@ -104,6 +116,14 @@ impl Session {
         note_action();
         crate::overlay::touch();
         Ok(json!({"window": self.get_window(window_id)?}))
+    }
+
+    fn guard_mutation(&self, window_id: i64, background: bool) -> Result<(), String> {
+        if background {
+            self.guard_background(window_id)
+        } else {
+            self.guard_input(window_id)
+        }
     }
 
     /// Ask the window to close, as its title-bar X would. The app may show a
