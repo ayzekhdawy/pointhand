@@ -12,6 +12,7 @@
 - `click` accepts `click_count` 3; `batch` adds `triple_click`, `toggle`, `select`, `window_state`, `move_window` and `wait_for`.
 - Background mode (`background: true`, or `POINTHAND_BACKGROUND=1`): the agent works in one window while the user keeps working in another. Accessibility actions run without moving focus; clicks, drags, drawing, scrolling, typing and single keys are posted to the target window, even when it is covered. The idle wait is skipped; the allow-list and Escape still apply. `paste` and modifier chords are refused in this mode.
 - Update notices: PointHand checks GitHub for a newer release (at most every 12 hours, cached) and adds one notice with the release highlights to the first tool result, so any AI client can tell the user. `check_for_updates` checks on demand. Nothing installs itself; `POINTHAND_UPDATE_CHECK=0` turns it off.
+- In background mode a single left click on an accessibility element uses its Invoke, Toggle or Select action first, because an inactive window drops posted button presses. WinUI 3 apps such as Windows 11 Paint ignore posted mouse input.
 - `get_element` reads one element's live properties; `perform_secondary_action` accepts `Focus`.
 - These ideas come from Vercel Labs' agent-desktop (Apache-2.0); PointHand reimplements them and copies no code.
 

@@ -16,6 +16,8 @@
 use std::time::Duration;
 
 use serde_json::{json, Value};
+use uiautomation::patterns::{UIInvokePattern, UISelectionItemPattern, UITogglePattern};
+use uiautomation::UIElement;
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -131,6 +133,19 @@ impl Session {
             return Err("click count must be 1, 2, or 3".into());
         }
         self.guard_background(window)?;
+        // An inactive window cannot capture the mouse, so a posted press on a
+        // button is often dropped. A single left click on an element that has
+        // a semantic action uses that action instead.
+        let index = params
+            .get("element_index")
+            .and_then(|v| v.as_i64())
+            .filter(|index| *index >= 0);
+        if let (Some(index), Button::Left, 1) = (index, button, count) {
+            if let Some(how) = semantic_click(self.cached(index as usize)?)? {
+                note_action();
+                return Ok(json!({"clicked": [x, y], "background": true, "delivery": how}));
+            }
+        }
         let target = MessageTarget::at(window, x, y)?;
         let (down, up, double, held) = button.messages();
         target.post_mouse(WM_MOUSEMOVE, 0, x, y)?;
@@ -377,6 +392,27 @@ fn post_stroke(window: i64, points: &[(i32, i32)]) -> Result<(), String> {
     let last = points.last().copied().unwrap_or(*first);
     let released = target.post_mouse(WM_LBUTTONUP, 0, last.0, last.1);
     outcome.and(released)
+}
+
+/// Invoke, then Toggle, then Select. None means the element has none of them
+/// and the click should be posted instead.
+fn semantic_click(element: &UIElement) -> Result<Option<&'static str>, String> {
+    if !element.is_enabled().unwrap_or(true) {
+        return Err("the element is disabled; no click was sent".into());
+    }
+    if let Ok(pattern) = element.get_pattern::<UIInvokePattern>() {
+        pattern.invoke().map_err(|err| err.to_string())?;
+        return Ok(Some("uia_invoke"));
+    }
+    if let Ok(pattern) = element.get_pattern::<UITogglePattern>() {
+        pattern.toggle().map_err(|err| err.to_string())?;
+        return Ok(Some("uia_toggle"));
+    }
+    if let Ok(pattern) = element.get_pattern::<UISelectionItemPattern>() {
+        pattern.select().map_err(|err| err.to_string())?;
+        return Ok(Some("uia_select"));
+    }
+    Ok(None)
 }
 
 fn focused_control(window: i64) -> Result<HWND, String> {

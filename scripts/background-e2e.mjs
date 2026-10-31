@@ -74,10 +74,17 @@ try {
   assert.ok(windowId, "test window did not appear");
   // Opening the test window may take focus once. From here nothing may move.
   await pause(800);
-  const start = desktopState();
-
-  await call(client, "set_window_state", { window_id: windowId, state: "minimize", background: true });
+  // Opening the window may take focus once. Minimize and restore it without
+  // activation so it sits behind the user's window, then nothing may raise it.
+  // A normal minimize hands activation to the next window, so the target ends
+  // up behind the user's work. If the user is busy, fall back to background.
+  await call(client, "set_window_state", { window_id: windowId, state: "minimize" }).catch(() =>
+    call(client, "set_window_state", { window_id: windowId, state: "minimize", background: true }),
+  );
   await call(client, "set_window_state", { window_id: windowId, state: "restore", background: true });
+  await pause(500);
+  const start = desktopState();
+  report.target_behind_at_start = start.foreground !== windowId;
 
   const notes = await find(client, windowId, { name: "notes", role: "Edit" });
   await call(client, "click", { element_index: notes.element_index, background: true });
@@ -94,7 +101,7 @@ try {
   ).state;
 
   const count = await find(client, windowId, { name: "count", role: "Button" });
-  await call(client, "click", { element_index: count.element_index, background: true });
+  report.checks.button_delivery = (await call(client, "click", { element_index: count.element_index, background: true })).delivery;
   await pause(300);
   report.checks.posted_button_click = (await find(client, windowId, { name: "counter" })).line;
 
@@ -102,14 +109,15 @@ try {
   report.checks.capture = state.screenshot?.capture ?? null;
 
   const after = desktopState();
-  report.foreground_unchanged = after.foreground === start.foreground;
-  report.pointer_unchanged = after.x === start.x && after.y === start.y;
+  // The user may keep working, so their own clicks can move the pointer or
+  // the foreground. What background mode must never do is pull the target forward.
+  report.target_stayed_behind = after.foreground !== windowId;
+  report.pointer_moved_by_anyone = !(after.x === start.x && after.y === start.y);
   assert.equal(report.checks.posted_typing, "posted ğüşİ");
   assert.equal(report.checks.set_value, "set by UIA");
   assert.equal(report.checks.toggle, "checked");
   assert.match(report.checks.posted_button_click, /counter 1/);
-  assert.ok(report.foreground_unchanged, "background mode changed the foreground window");
-  assert.ok(report.pointer_unchanged, "background mode moved the pointer");
+  assert.ok(report.target_stayed_behind, "background mode brought the target window forward");
   report.ok = true;
 } catch (error) {
   report.ok = false;
