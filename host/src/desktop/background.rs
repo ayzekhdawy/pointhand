@@ -37,7 +37,7 @@ const MAX_BACKGROUND_TEXT: usize = 20_000;
 
 /// `background: true` on the call, or `POINTHAND_BACKGROUND=1` as the default.
 /// An explicit `background: false` always wins.
-pub(super) fn wants_background(params: &Value) -> bool {
+pub(crate) fn wants_background(params: &Value) -> bool {
     match params.get("background").and_then(|v| v.as_bool()) {
         Some(explicit) => explicit,
         None => default_on(std::env::var("POINTHAND_BACKGROUND").ok().as_deref()),
