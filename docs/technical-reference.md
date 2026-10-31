@@ -38,7 +38,59 @@ omits the image bytes; call `get_window_state`, then retry once.
 `scroll`, `type_text`, `press_key`, `set_value`, `perform_secondary_action`,
 `paste`, `clipboard_read`, `clipboard_write`, `start_audio_recording`,
 `stop_audio_recording`, `batch`, `overlay_status`, `guard_status`,
-`get_system_info`, `draw_strokes`, `emergency_stop`.
+`get_system_info`, `draw_strokes`, `emergency_stop`, `find_elements`,
+`wait_for`, `set_window_state`, `move_window`, `close_window`, `get_element`,
+`check_for_updates`.
+
+## Update notices
+
+At startup the MCP server asks GitHub for the newest PointHand release
+(`api.github.com/repos/ayzekhdawy/pointhand/releases`), at most once every 12
+hours; the answer is cached in `%LOCALAPPDATA%\PointHand\update-check.json`.
+When a newer release exists, the first tool result of the session gets one
+extra text line with both versions, the release highlights and the release
+page, so whichever AI client is in use can tell the user. `check_for_updates`
+asks again on demand. Nothing is downloaded or installed automatically, and no
+data is sent beyond the request itself. `POINTHAND_UPDATE_CHECK=0` turns the
+check off. The shipped version lives in `client/src/update.ts` (`VERSION`);
+bump it with every release tag.
+
+## Background mode
+
+Background mode lets the agent work in one window while you keep working in
+another. Pass `background: true` on a call, on `batch` (it becomes the default
+for every action), or set `POINTHAND_BACKGROUND=1` to make it the default; an
+explicit `background: false` always wins.
+
+- `set_value` and `perform_secondary_action` run through UI Automation without
+  moving focus. This is the most reliable background path.
+- `click`, `move`, `drag`, `draw`, `draw_shape`, `draw_strokes` and `scroll`
+  post mouse messages to the deepest visible child of the target window under
+  the point. The real pointer does not move, and a covered window still gets
+  the input. The window must not be minimized.
+- `type_text` posts characters to the control that has focus inside the target
+  window's thread; click the field with `background: true` first. `press_key`
+  posts one key without modifiers. Chords such as `ctrl+s` cannot be posted
+  without touching your keyboard and are refused.
+- `paste` is refused because it would replace your clipboard.
+- `get_window_state` with `background: true` captures the window without waiting
+  for you to stop typing.
+
+Every background call needs a target window (`window_id`, an `element_index`, or a
+window `screenshotId`). It skips the idle wait, because nothing physical moves,
+and does not draw the cursor overlay. The allow-list, the elevated-window check,
+the locked-desktop check and physical Escape still apply. Escape stops every
+mutation, including when you press it in your own window.
+
+Posted messages are not proof of delivery. Classic Win32 controls accept them;
+Chromium, Electron and some WinUI surfaces may ignore them. Results report
+`delivery: "posted"`; check the effect with a window screenshot, which reads the
+window's own pixels even while it is covered.
+
+`get_element` reads one element from the latest snapshot: role, name,
+`automation_id`, class, rectangle, enabled, offscreen, focused, value, toggle
+state and runnable actions. A password field never returns its value.
+`perform_secondary_action` also accepts `Focus`.
 
 `emergency_stop` is available in Alpha 2: it interrupts active
 input without waiting for the request queue. Restart the MCP server to resume.
@@ -52,8 +104,11 @@ captures the whole desktop or a `[left, top, right, bottom]` region.
 always has `tree` when text was requested, and adds `focused_element`,
 `selected_elements`, `document_text`, or `selected_text` when UI Automation
 exposes them. A line includes `actions="Invoke, Expand"` only for patterns that
-element can run. Scroll labels are left off at the end of that axis. Pass one
-of those labels to `perform_secondary_action`; matching ignores case. Click an
+element can run, including `Toggle` and `Select`. Scroll labels are left off at
+the end of that axis. Check boxes and toggle buttons add `checked`, `unchecked`
+or `mixed`. A password field adds `password` and never shows its value. Pass one
+of those labels to `perform_secondary_action`; matching ignores case. `Toggle`
+returns the new `state`. A disabled element is refused before anything is sent. Click an
 `element_index` from that tree, or a point. With
 `window_id`, `x` and `y` are window pixels. Divide image pixels by
 `screenshot.scale`. Each captured region returns `screenshot.id` and a
@@ -73,8 +128,40 @@ records include a `monitors` array with each touched display and the overlap.
 After a recent action, `get_window_state` and `screenshot` wait about 1 second before reading the screen. If a progress indicator is visible, or the window rectangle or layout is still changing, the wait continues in 200 ms steps for up to 5 more seconds. The result field is `waited_ms`. A finished progress bar does not keep the wait open. The agent should not add its own pause. The wait is not the idle gate: it does not require the pointer to stay still, and physical Escape still cancels it. A covered-point refusal does not start this clock.
 
 `batch` runs up to 50 actions and stops at the first error. The Rust host
-accepts `click`, `double_click`, `right_click`, `move`, `drag`, `draw`, `scroll`,
-`type`, `key`, `set_value`, `secondary`, `paste`, `focus_window`, and `wait`.
+accepts `click`, `double_click`, `triple_click`, `right_click`, `move`, `drag`,
+`draw`, `scroll`, `type`, `key`, `set_value`, `secondary`, `toggle`, `select`,
+`paste`, `focus_window`, `window_state`, `move_window`, `wait`, and `wait_for`.
+`click` accepts `click_count` 1 to 3.
+
+`find_elements` searches one window's accessibility tree by `name` (a
+case-insensitive part of the accessible name), `role` (control type such as
+`Button` or `CheckBox`; case and spaces ignored) and `automation_id` (exact).
+Every given field must match. It walks up to 3000 elements, depth 32 and 256
+children per element, and returns at most `limit` matches (default 50, maximum
+200) with their `element_index`. It replaces the cached snapshot, so those
+indices work with `click`, `set_value` and `perform_secondary_action`.
+`complete: false` means the walk stopped before the end of the tree.
+
+`wait_for` polls every 250 ms until a window whose title contains
+`window_title` appears, or an element matching the `find_elements` fields
+appears in `window_id`. `gone: true` waits for it to disappear instead; a window
+that closes counts as gone. `timeout_ms` defaults to 5000 and stops at 30000; a
+timeout is an error, so a batch stops there. It reads only, takes no input lane,
+and physical Escape stops it.
+
+`set_window_state` minimizes, maximizes or restores a window. `move_window`
+sets `x`, `y`, `width` and `height` in physical screen pixels; omitted values
+keep the current ones, a maximized or minimized window is restored first, each
+side must be at least 100 px and the rectangle must overlap the virtual desktop.
+`close_window` posts the same close request as the title-bar X and reports
+whether the window was gone within 2 seconds; the app may show a save prompt
+instead. It refuses Windows session processes such as `explorer.exe`, `dwm.exe`
+and `csrss.exe` by exact name, and it is not available inside `batch`. All three
+use the same allow-list, idle wait and Escape stop as other input.
+
+Background mode follows agent-desktop's headless accessibility actions. The idea for these tools comes from Vercel Labs'
+[agent-desktop](https://github.com/vercel-labs/agent-desktop) (Apache-2.0).
+PointHand reimplements them for its own host; no agent-desktop code is copied.
 
 Key names include `Return`, `Control_L+a`, `KP_0`, `page_up`, and `super`.
 
@@ -95,8 +182,11 @@ until the MCP server restarts. `POINTHAND_ALLOW` is a comma-separated list of
 paths, exe names, or names without an extension (`notepad.exe` also allows
 `notepad`). An empty list allows every app.
 
-Windows blocks synthetic input into elevated windows. PointHand reports that
-as an error.
+Windows blocks synthetic input into elevated windows. Before sending input,
+PointHand compares the target process's integrity level with its own. A higher
+target returns `elevated_target` and nothing is sent. Capture and
+`activate_window` still work. If the level cannot be read, the input goes ahead
+as before.
 
 The Rust host draws PointHand's own click-through, non-activating glass frame
 and cursor. Native layered windows are excluded from screenshots by default;

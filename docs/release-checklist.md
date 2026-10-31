@@ -37,3 +37,7 @@ After packaging, run `./scripts/verify-package.ps1` to verify the ZIP hash, bina
 See [extended-display validation](multimonitor-validation.md) for the Sunshine virtual-display test, its measured DPI/coordinate results and the remaining physical-hardware limits.
 
 For a manual input check, run `node scripts/manual-physical-e2e.mjs` from a source checkout with Python/Tkinter installed. Keep the physical mouse still during setup. The drawing is expected to finish if the mouse moves. Escape, not mouse movement, cancels the active stroke and later requests until restart. The script closes its fixture and stores the report under ignored `.scratch/`.
+
+## Version bump
+
+- Set `VERSION` in `client/src/update.ts` to the new tag (without `v`) before tagging, so installed copies can tell their users about the release.

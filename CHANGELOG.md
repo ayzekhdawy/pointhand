@@ -3,6 +3,17 @@
 ## Unreleased
 
 - Ship `skills/pointhand/SKILL.md` and a Grok App / Grok CLI setup section in the README.
+- `find_elements` searches a window's accessibility tree by name, role or automation id (up to 3000 elements) and returns only the matches with usable `element_index` values.
+- `wait_for` waits for a window title or an element to appear or disappear (up to 30 seconds, Escape stops it).
+- `set_window_state`, `move_window` and `close_window` manage windows under the same allow-list, idle and Escape rules. `close_window` refuses Windows session processes.
+- `perform_secondary_action` runs `Toggle` and `Select`. Tree lines show `checked`, `unchecked` or `mixed`, and a disabled element is refused before anything is sent.
+- A password field's value no longer appears in the accessibility tree.
+- Input to a window running at a higher integrity level (administrator) is refused with `elevated_target` instead of being dropped silently by Windows.
+- `click` accepts `click_count` 3; `batch` adds `triple_click`, `toggle`, `select`, `window_state`, `move_window` and `wait_for`.
+- Background mode (`background: true`, or `POINTHAND_BACKGROUND=1`): the agent works in one window while the user keeps working in another. Accessibility actions run without moving focus; clicks, drags, drawing, scrolling, typing and single keys are posted to the target window, even when it is covered. The idle wait is skipped; the allow-list and Escape still apply. `paste` and modifier chords are refused in this mode.
+- Update notices: PointHand checks GitHub for a newer release (at most every 12 hours, cached) and adds one notice with the release highlights to the first tool result, so any AI client can tell the user. `check_for_updates` checks on demand. Nothing installs itself; `POINTHAND_UPDATE_CHECK=0` turns it off.
+- `get_element` reads one element's live properties; `perform_secondary_action` accepts `Focus`.
+- These ideas come from Vercel Labs' agent-desktop (Apache-2.0); PointHand reimplements them and copies no code.
 
 ## v0.2.0-alpha.5
 

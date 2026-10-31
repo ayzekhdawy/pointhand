@@ -58,7 +58,7 @@ PointHand reproduced the Mona Lisa in Microsoft Paint through its own MCP server
 
 The TypeScript MCP server connects your agent to a native Rust host. Windows input, accessibility and the overlay run in that host. The portable package needs **Node.js 20+**; Rust and Python are only needed for development or optional components.
 
-**Release status:** **v0.2.0-alpha.5** is an alpha for supervised workflows with 28 MCP tools. Accessibility lines name only the actions an element can run, and `start_audio_recording` records what Windows is playing. See the [release notes](docs/releases/alpha-5.md) and [validation limits](docs/release-checklist.md). Alpha 4 remains available.
+**Release status:** **v0.2.0-alpha.5** is an alpha for supervised workflows with 28 MCP tools (the next release adds background mode, element search, waits, window management and update notices for 35). Accessibility lines name only the actions an element can run, and `start_audio_recording` records what Windows is playing. See the [release notes](docs/releases/alpha-5.md) and [validation limits](docs/release-checklist.md). Alpha 4 remains available.
 
 ## Quick start
 

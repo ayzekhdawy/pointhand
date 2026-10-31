@@ -6,9 +6,22 @@ import { z } from "zod";
 import { ComputerUseHost } from "./host.js";
 import { coveredRefusal, normalizeParams, presentPayload } from "./compat.js";
 import { shapePoints } from "./shapes.js";
+import { VERSION, checkForUpdate, updateCheckEnabled, updateNotice, type UpdateInfo } from "./update.js";
 
 const host = new ComputerUseHost(ComputerUseHost.locate());
-const server = new McpServer({ name: "pointhand", version: "0.2.0" });
+const server = new McpServer({ name: "pointhand", version: VERSION });
+
+// Checked once in the background. The first tool result after a newer
+// release is found carries one notice, so any agent can tell its user.
+let pendingUpdate: UpdateInfo | null = null;
+let updateAnnounced = false;
+void checkForUpdate().then((info) => { if (info?.newer) pendingUpdate = info; });
+
+function withUpdateNotice(result: ToolResult): ToolResult {
+  if (!pendingUpdate || updateAnnounced) return result;
+  updateAnnounced = true;
+  return { ...result, content: [...result.content, { type: "text", text: updateNotice(pendingUpdate) }] };
+}
 
 type ToolResult = {
   content: Array<
@@ -30,7 +43,7 @@ function present(value: unknown): ToolResult {
 async function run(method: string, params: unknown, timeoutMs = 20_000): Promise<ToolResult> {
   try {
     const value = await host.call(method, normalizeParams(method, params), timeoutMs);
-    const presented = present(value);
+    const presented = withUpdateNotice(present(value));
     if (coveredRefusal(value)) return { ...presented, isError: true };
     return presented;
   } catch (error) {
@@ -43,6 +56,16 @@ server.registerTool("overlay_status", {
   description: "PointHand native Rust overlay readiness, frame timing and renderer errors.",
   inputSchema: {},
 }, async () => run("overlay_status", {}));
+
+server.registerTool("check_for_updates", {
+  description: "Compare this PointHand version with the newest GitHub release and list what the new release adds. Sends only a request to api.github.com; disable with POINTHAND_UPDATE_CHECK=0. PointHand never downloads or installs updates itself.",
+  inputSchema: {},
+}, async () => {
+  if (!updateCheckEnabled()) return present({ current: VERSION, update_check: "disabled by POINTHAND_UPDATE_CHECK" });
+  const info = await checkForUpdate(true);
+  if (!info) return present({ current: VERSION, latest: null, note: "GitHub could not be reached; try again later." });
+  return present(info.newer ? { ...info, notice: updateNotice(info) } : { ...info, note: "PointHand is up to date." });
+});
 
 server.registerTool("guard_status", {
   description: "Physical-input monitor readiness and active desktop availability; no keystroke content is recorded.",
@@ -67,6 +90,12 @@ server.registerTool("get_system_info", {
 }, async () => run("get_system_info", {}));
 
 const windowId = z.number().int().positive().describe("Window id from list_windows.");
+const background = z.boolean().optional().describe(
+  "Work without touching the user's mouse, keyboard or focus, so they can keep working in another window. " +
+  "Needs a target window. Pointer and key input is posted to that window even when it is covered; it must not be minimized. " +
+  "Classic Win32 controls accept it; Chromium, Electron and some modern apps may ignore it, so verify with get_window_state. " +
+  "Skips the wait for the user to be idle. The allow-list and physical Escape still apply. Default from POINTHAND_BACKGROUND.",
+);
 const window = z.object({ id: z.number().int().positive(), app: z.string().optional(), title: z.string().optional() }).optional();
 const target = { window_id: windowId.optional(), window };
 const point = {
@@ -76,6 +105,7 @@ const point = {
   screenshotId: z.string().min(1).optional().describe("Window, monitor slice, owned popup, or monitor screenshot. x and y are physical pixels inside that region."),
   ...target,
   element_index: z.number().int().optional().describe("Index from the latest accessibility tree. Preferred over x,y."),
+  background,
 };
 
 server.registerTool(
@@ -137,12 +167,14 @@ server.registerTool(
       "Pass a region's screenshotId to click, drag, scroll, or move. x and y are physical pixels inside that region, not image pixels: divide image pixels by scale. " +
       "The id must belong to the latest capture, and the window or popup must still be where it was captured. " +
       "After a recent action the host waits about 1 second, and up to 5 seconds more while a progress indicator is visible or the layout is still changing. Do not insert your own delay. The result includes waited_ms. " +
-      "With include_text, a line lists actions=\"Invoke, Expand\" for the secondary actions that element can run.",
+      "With include_text, a line lists actions=\"Invoke, Expand\" for the secondary actions that element can run. " +
+      "Check boxes and toggle buttons show checked, unchecked or mixed. A password field shows password and never its value.",
     inputSchema: {
       ...target,
       include_screenshot: z.boolean().optional(),
       include_text: z.boolean().optional(),
       scale: z.number().optional().describe("Longest-edge scale, capped so the image stays under 1568px. Default 0.5."),
+      background: z.boolean().optional().describe("Do not wait for the user to stop typing before a window capture."),
     },
   },
   async (args) => run("get_window_state", args, 30_000),
@@ -156,8 +188,8 @@ server.registerTool(
       ...point,
       button: z.enum(["left", "right", "middle"]).optional(),
       mouse_button: z.enum(["left", "right", "middle", "l", "r", "m"]).optional(),
-      click_count: z.number().int().min(1).max(2).optional(),
-      count: z.number().int().optional().describe("2 double-clicks."),
+      click_count: z.number().int().min(1).max(3).optional(),
+      count: z.number().int().optional().describe("2 double-clicks, 3 triple-clicks (selects a line or paragraph in most editors)."),
       screenshotId: z.string().min(1).optional(),
     },
   },
@@ -172,6 +204,7 @@ server.registerTool(
       ...target,
       points: z.array(z.tuple([z.number().int(), z.number().int()])).min(2),
       step: z.number().int().optional().describe("Maximum pixels between samples. Default 6."),
+      background,
     },
   },
   async (args) => run("draw", args, 60_000),
@@ -195,6 +228,7 @@ server.registerTool(
       sides: z.number().int().optional().describe("Polygon sides or star points (3-24)."),
       ...target,
       step: z.number().int().optional().describe("Maximum pixels between samples. Default 6."),
+      background,
     },
   },
   async (args) => {
@@ -208,7 +242,7 @@ server.registerTool(
         rotation: args.rotation,
         sides: args.sides,
       });
-      return await run("draw", { window_id: args.window_id, window: args.window, points, step: args.step }, 60_000);
+      return await run("draw", { window_id: args.window_id, window: args.window, points, step: args.step, background: args.background }, 60_000);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return { content: [{ type: "text", text: message }], isError: true };
@@ -224,6 +258,7 @@ server.registerTool("draw_strokes", {
     hold_ms: z.number().int().min(0).max(500).optional().describe("Pause after pressing and before releasing each stroke. Raise it for apps that read the cursor late (Illustrator). Default 0."),
     settle_ms: z.number().int().min(0).max(1000).optional().describe("Pause between strokes. Default 3."),
     step: z.number().int().min(0).max(200).optional().describe("Walk the pointer in steps of this many pixels. 0 (default) sends only the end points; use 6-12 for Illustrator."),
+    background,
   },
 }, async args => run("draw_strokes",args,600_000));
 
@@ -263,6 +298,7 @@ server.registerTool(
       to_x: z.number().int(),
       to_y: z.number().int(),
       screenshotId: z.string().min(1).optional(),
+      background: background.describe("Post the drag to window_id in window pixels; screenshotId is not used in background mode."),
     },
   },
   async (args) => run("drag", args),
@@ -289,6 +325,7 @@ server.registerTool(
     inputSchema: {
       text: z.string(),
       ...target,
+      background: background.describe("Post characters to the focused control inside window_id. Click the field with background:true first, or use set_value."),
     },
   },
   async (args) => run("type_text", args),
@@ -301,6 +338,7 @@ server.registerTool(
     inputSchema: {
       key: z.string(),
       ...target,
+      background: background.describe("Post one key without modifiers to the focused control inside window_id. Chords such as ctrl+s need background:false."),
     },
   },
   async (args) => run("press_key", args),
@@ -314,6 +352,7 @@ server.registerTool(
       ...target,
       element_index: z.number().int(),
       value: z.string(),
+      background: z.boolean().optional().describe("Set the value without moving focus or waiting for the user to be idle."),
     },
   },
   async (args) => run("set_value", args),
@@ -322,14 +361,112 @@ server.registerTool(
 server.registerTool(
   "perform_secondary_action",
   {
-    description: "Run one actions= label from the latest accessibility tree: Invoke, Expand, Collapse, Raise, or Scroll Up, Scroll Down, Scroll Left, Scroll Right. Matching ignores case. Do not guess a label the tree did not list.",
+    description: "Run one actions= label from the latest accessibility tree or find_elements result: Invoke, Toggle, Select, Expand, Collapse, Raise, or Scroll Up, Scroll Down, Scroll Left, Scroll Right. Focus moves keyboard focus to the element. Matching ignores case. Do not guess a label the tree did not list. Toggle returns the new state. A disabled element is refused without sending anything.",
     inputSchema: {
       ...target,
       element_index: z.number().int(),
       action: z.string(),
+      background: z.boolean().optional().describe("Run the action without moving focus or waiting for the user to be idle."),
     },
   },
   async (args) => run("perform_secondary_action", args),
+);
+
+const elementFilter = {
+  name: z.string().optional().describe("Case-insensitive part of the element's accessible name."),
+  role: z.string().optional().describe("Control type such as Button, Edit, CheckBox, ListItem, MenuItem. Case and spaces are ignored."),
+  automation_id: z.string().optional().describe("Exact UI Automation id."),
+};
+
+server.registerTool(
+  "find_elements",
+  {
+    description:
+      "Search one window's accessibility tree by name, role or automation_id instead of reading the whole tree. " +
+      "Walks up to 3000 elements (get_window_state stops at 400) and returns only the matches with their element_index. " +
+      "This replaces the latest accessibility snapshot, so the indices work with click, set_value and perform_secondary_action. " +
+      "complete=false means the window had more elements than were walked.",
+    inputSchema: {
+      window_id: windowId,
+      ...elementFilter,
+      limit: z.number().int().min(1).max(200).optional().describe("Most matches to return. Default 50."),
+    },
+  },
+  async (args) => run("find_elements", args, 30_000),
+);
+
+server.registerTool(
+  "get_element",
+  {
+    description:
+      "Read one element from the latest accessibility snapshot live: role, name, automation_id, class, rectangle, enabled, offscreen, focused, value, toggle state and runnable actions. " +
+      "A password field reports password=true and never its value. Reads only.",
+    inputSchema: {
+      ...target,
+      element_index: z.number().int().min(0),
+    },
+  },
+  async (args) => run("get_element", args),
+);
+
+server.registerTool(
+  "wait_for",
+  {
+    description:
+      "Wait until a window whose title contains window_title appears, or an element matching name/role/automation_id appears in window_id. " +
+      "With gone=true, wait until it disappears instead. Reads only and sends no input. Polls every 250 ms; timeout_ms defaults to 5000 and stops at 30000. " +
+      "Use this after a click that opens a dialog or starts a load instead of a fixed wait. Element matches replace the latest accessibility snapshot. Escape stops the wait.",
+    inputSchema: {
+      window_title: z.string().optional(),
+      window_id: windowId.optional(),
+      ...elementFilter,
+      gone: z.boolean().optional(),
+      timeout_ms: z.number().int().min(0).max(30000).optional(),
+    },
+  },
+  async (args) => run("wait_for", args, 40_000),
+);
+
+server.registerTool(
+  "set_window_state",
+  {
+    description: "Minimize, maximize or restore a window. Follows the same allow-list, idle and Escape rules as other input.",
+    inputSchema: {
+      window_id: windowId,
+      state: z.enum(["minimize", "maximize", "restore"]),
+      background: z.boolean().optional().describe("Minimize or restore without taking focus from the user. Maximize always activates."),
+    },
+  },
+  async (args) => run("set_window_state", args),
+);
+
+server.registerTool(
+  "move_window",
+  {
+    description:
+      "Move or resize a window in physical screen pixels. Omitted values keep the current ones. " +
+      "A maximized or minimized window is restored first. The window must stay at least 100 px on each side and overlap the desktop. Does not bring the window forward.",
+    inputSchema: {
+      window_id: windowId,
+      x: z.number().int().optional(),
+      y: z.number().int().optional(),
+      width: z.number().int().positive().optional(),
+      height: z.number().int().positive().optional(),
+      background: z.boolean().optional().describe("Skip the idle wait and restore a minimized window without taking focus."),
+    },
+  },
+  async (args) => run("move_window", args),
+);
+
+server.registerTool(
+  "close_window",
+  {
+    description:
+      "Ask a window to close, like its title-bar X. The app may show a save prompt instead; closed=false then means the window is still open. " +
+      "Windows session processes such as explorer.exe are refused. Not available inside batch.",
+    inputSchema: { window_id: windowId },
+  },
+  async (args) => run("close_window", args, 20_000),
 );
 
 server.registerTool(
@@ -388,10 +525,11 @@ server.registerTool(
   {
     description:
       "Run up to 50 actions in order and stop at the first error. A covered point stops the batch without sending that input; call get_window_state and retry once. " +
-      "Actions: click, double_click, right_click, move, drag, draw, scroll, type, key, set_value, secondary, paste, focus_window, wait. " +
+      "Actions: click, double_click, triple_click, right_click, move, drag, draw, scroll, type, key, set_value, secondary, toggle, select, paste, focus_window, window_state, move_window, wait, wait_for. " +
       "Input waits until the user has been idle, and Escape stops further actions.",
     inputSchema: {
       actions: z.array(z.record(z.string(), z.unknown())).max(50),
+      background: z.boolean().optional().describe("Default background flag for every action that does not set its own."),
     },
   },
   async (args) => run("batch", args, 60_000),
