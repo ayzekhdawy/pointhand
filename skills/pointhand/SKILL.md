@@ -43,6 +43,8 @@ When it is configured as the `pointhand` MCP server, its tools appear as `pointh
 - Elevated (admin) windows return `elevated_target`, and the secure desktop (UAC, lock screen) rejects input.
   Report it instead of retrying.
 - Only call `close_window` when the user asked to close that window.
+- If a tool result says a PointHand update is available, tell the user once with the highlights and the release
+  link. Do not download or install it yourself.
 
 ## Setup (for the user)
 

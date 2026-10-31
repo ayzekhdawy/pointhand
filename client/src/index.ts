@@ -6,9 +6,22 @@ import { z } from "zod";
 import { ComputerUseHost } from "./host.js";
 import { coveredRefusal, normalizeParams, presentPayload } from "./compat.js";
 import { shapePoints } from "./shapes.js";
+import { VERSION, checkForUpdate, updateCheckEnabled, updateNotice, type UpdateInfo } from "./update.js";
 
 const host = new ComputerUseHost(ComputerUseHost.locate());
-const server = new McpServer({ name: "pointhand", version: "0.2.0" });
+const server = new McpServer({ name: "pointhand", version: VERSION });
+
+// Checked once in the background. The first tool result after a newer
+// release is found carries one notice, so any agent can tell its user.
+let pendingUpdate: UpdateInfo | null = null;
+let updateAnnounced = false;
+void checkForUpdate().then((info) => { if (info?.newer) pendingUpdate = info; });
+
+function withUpdateNotice(result: ToolResult): ToolResult {
+  if (!pendingUpdate || updateAnnounced) return result;
+  updateAnnounced = true;
+  return { ...result, content: [...result.content, { type: "text", text: updateNotice(pendingUpdate) }] };
+}
 
 type ToolResult = {
   content: Array<
@@ -30,7 +43,7 @@ function present(value: unknown): ToolResult {
 async function run(method: string, params: unknown, timeoutMs = 20_000): Promise<ToolResult> {
   try {
     const value = await host.call(method, normalizeParams(method, params), timeoutMs);
-    const presented = present(value);
+    const presented = withUpdateNotice(present(value));
     if (coveredRefusal(value)) return { ...presented, isError: true };
     return presented;
   } catch (error) {
@@ -43,6 +56,16 @@ server.registerTool("overlay_status", {
   description: "PointHand native Rust overlay readiness, frame timing and renderer errors.",
   inputSchema: {},
 }, async () => run("overlay_status", {}));
+
+server.registerTool("check_for_updates", {
+  description: "Compare this PointHand version with the newest GitHub release and list what the new release adds. Sends only a request to api.github.com; disable with POINTHAND_UPDATE_CHECK=0. PointHand never downloads or installs updates itself.",
+  inputSchema: {},
+}, async () => {
+  if (!updateCheckEnabled()) return present({ current: VERSION, update_check: "disabled by POINTHAND_UPDATE_CHECK" });
+  const info = await checkForUpdate(true);
+  if (!info) return present({ current: VERSION, latest: null, note: "GitHub could not be reached; try again later." });
+  return present(info.newer ? { ...info, notice: updateNotice(info) } : { ...info, note: "PointHand is up to date." });
+});
 
 server.registerTool("guard_status", {
   description: "Physical-input monitor readiness and active desktop availability; no keystroke content is recorded.",

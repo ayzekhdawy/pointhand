@@ -39,7 +39,21 @@ omits the image bytes; call `get_window_state`, then retry once.
 `paste`, `clipboard_read`, `clipboard_write`, `start_audio_recording`,
 `stop_audio_recording`, `batch`, `overlay_status`, `guard_status`,
 `get_system_info`, `draw_strokes`, `emergency_stop`, `find_elements`,
-`wait_for`, `set_window_state`, `move_window`, `close_window`, `get_element`.
+`wait_for`, `set_window_state`, `move_window`, `close_window`, `get_element`,
+`check_for_updates`.
+
+## Update notices
+
+At startup the MCP server asks GitHub for the newest PointHand release
+(`api.github.com/repos/ayzekhdawy/pointhand/releases`), at most once every 12
+hours; the answer is cached in `%LOCALAPPDATA%\PointHand\update-check.json`.
+When a newer release exists, the first tool result of the session gets one
+extra text line with both versions, the release highlights and the release
+page, so whichever AI client is in use can tell the user. `check_for_updates`
+asks again on demand. Nothing is downloaded or installed automatically, and no
+data is sent beyond the request itself. `POINTHAND_UPDATE_CHECK=0` turns the
+check off. The shipped version lives in `client/src/update.ts` (`VERSION`);
+bump it with every release tag.
 
 ## Background mode
 
