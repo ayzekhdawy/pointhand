@@ -82,8 +82,17 @@ and does not draw the cursor overlay. The allow-list, the elevated-window check,
 the locked-desktop check and physical Escape still apply. Escape stops every
 mutation, including when you press it in your own window.
 
-Posted messages are not proof of delivery. Classic Win32 controls accept them;
-Chromium, Electron and some WinUI surfaces may ignore them. Results report
+A single left `click` on an `element_index` first tries the element's
+UI Automation action (Invoke, then Toggle, then Select) and reports
+`delivery: "uia_invoke"`, `"uia_toggle"` or `"uia_select"`. An inactive window
+cannot capture the mouse, so a posted press on a button is often dropped; the
+semantic action is not. Elements without one, such as text fields and canvases,
+get posted messages.
+
+Posted messages are not proof of delivery. Classic Win32 controls accept them
+(measured: WinForms text boxes, Character Map). WinUI 3 apps such as the
+Windows 11 Paint ignore posted mouse input entirely, and Chromium and Electron
+may ignore it too; draw in those apps with `background: false`. Results report
 `delivery: "posted"`; check the effect with a window screenshot, which reads the
 window's own pixels even while it is covered.
 
