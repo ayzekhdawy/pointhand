@@ -15,12 +15,17 @@ When it is configured as the `pointhand` MCP server, its tools appear as `pointh
 2. **Look before acting.** Call `get_window_state` (accessibility tree plus screenshot) or `screenshot`.
    Each result carries a `screenshotId` and a screen origin. Pointer actions (`click`, `drag`, `scroll`)
    bind to the latest `screenshotId` of that window, so take a fresh one after the UI changes.
-3. **Prefer semantic actions.** Use `set_value` and `perform_secondary_action` on accessibility elements when
-   they exist. Fall back to coordinates (`click`, `move`, `drag`) only when they don't.
-4. **Text and keys.** Use `type_text` for short input, `paste` for long or formatted text (`format`: `text`, `md` or `html`),
+3. **Prefer semantic actions.** Use `set_value` and `perform_secondary_action` (Invoke, Toggle, Select, Expand …)
+   on accessibility elements when they exist. In a large window, `find_elements` finds a control by name, role or
+   automation id without reading the whole tree. Fall back to coordinates (`click`, `move`, `drag`) only when they don't.
+4. **Wait for the result, not a timer.** After a click that opens a dialog or starts loading, use `wait_for`
+   (window title or element, or `gone: true`) instead of a fixed wait.
+5. **Text and keys.** Use `type_text` for short input, `paste` for long or formatted text (`format`: `text`, `md` or `html`),
    and `press_key` for chords (e.g. `ctrl+s`).
-5. **Drawing.** `draw` takes freehand strokes, `draw_shape` geometric shapes, and `batch` a sequence of actions in a single call.
-6. **Verify.** Take another `get_window_state` or `screenshot` and confirm the result before reporting success.
+6. **Windows.** `set_window_state` minimizes, maximizes or restores; `move_window` moves or resizes;
+   `close_window` asks a window to close (it may show a save prompt; check `closed`).
+7. **Drawing.** `draw` takes freehand strokes, `draw_shape` geometric shapes, and `batch` a sequence of actions in a single call.
+8. **Verify.** Take another `get_window_state` or `screenshot` and confirm the result before reporting success.
 
 ## Safety rules
 
@@ -31,7 +36,9 @@ When it is configured as the `pointhand` MCP server, its tools appear as `pointh
   returned `screenshotId`; if it is still covered, ask the user.
 - Only drive the apps the user asked for. `POINTHAND_ALLOW` limits which executables receive input.
 - Never type passwords, payment data or secrets unless the user explicitly asks in this session.
-- Elevated (admin) windows and the secure desktop (UAC, lock screen) can reject input. Report it instead of retrying.
+- Elevated (admin) windows return `elevated_target`, and the secure desktop (UAC, lock screen) rejects input.
+  Report it instead of retrying.
+- Only call `close_window` when the user asked to close that window.
 
 ## Setup (for the user)
 

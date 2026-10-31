@@ -15,10 +15,10 @@ use serde_json::{json, Value};
 use uiautomation::inputs::{Mouse, MouseButton};
 use uiautomation::patterns::{
     UIExpandCollapsePattern, UIInvokePattern, UIRangeValuePattern, UIScrollItemPattern,
-    UIScrollPattern, UISelectionItemPattern, UITextPattern, UIValuePattern,
+    UIScrollPattern, UISelectionItemPattern, UITextPattern, UITogglePattern, UIValuePattern,
 };
 use uiautomation::screenshots::Screenshot;
-use uiautomation::types::{ControlType, ExpandCollapseState, Point, Rect};
+use uiautomation::types::{ControlType, ExpandCollapseState, Point, Rect, ToggleState};
 use uiautomation::{UIAutomation, UIElement, UITreeWalker};
 use windows::core::{BOOL, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
@@ -39,6 +39,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetForegroundWindow, ShowWindow, GA_ROOTOWNER, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
     SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_RESTORE, SW_SHOWNORMAL,
 };
+
+mod elements;
+mod windows_ops;
 
 const MAX_NODES: usize = 400;
 const MAX_PASTE_CHARS: usize = 200_000;
@@ -217,7 +220,7 @@ impl Session {
     }
 
     pub fn activate(&mut self, window_id: i64) -> Result<Value, String> {
-        self.guard_input(window_id)?;
+        self.guard_capture(window_id)?;
         focus(window_id as isize)?;
         note_action();
         self.get_window(window_id)
@@ -232,7 +235,7 @@ impl Session {
     ) -> Result<Value, String> {
         self.ensure_allowed(window_id)?;
         if shot {
-            self.guard_input(window_id)?;
+            self.guard_capture(window_id)?;
         }
         let waited_ms = self.settle_before_observation(window_id as isize)?;
         let info = describe(window_id as isize)
@@ -380,8 +383,8 @@ impl Session {
             "middle" | "m" => MouseButton::MIDDLE,
             _ => return Err("unknown mouse button".into()),
         };
-        if !(1..=2).contains(&count) {
-            return Err("click count must be 1 or 2".into());
+        if !(1..=3).contains(&count) {
+            return Err("click count must be 1, 2, or 3".into());
         }
         crate::motion::move_pointer(x, y, instant_motion(params)?)?;
         for index in 0..count {
@@ -732,6 +735,7 @@ impl Session {
             .ok_or("missing value")?
             .to_string();
         let element = self.cached(index)?;
+        ensure_enabled(element, index)?;
         let _ = element.set_focus();
         let pattern: UIValuePattern = element
             .get_pattern()
@@ -750,12 +754,27 @@ impl Session {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let element = self.cached(index)?;
+        ensure_enabled(element, index)?;
         let _ = element.set_focus();
+        let mut state = None;
         match canonical(action)?.as_str() {
             "invoke" => {
                 let pattern: UIInvokePattern =
                     element.get_pattern().map_err(|err| err.to_string())?;
                 pattern.invoke().map_err(|err| err.to_string())?;
+            }
+            "toggle" => {
+                let pattern: UITogglePattern = element
+                    .get_pattern()
+                    .map_err(|_| format!("element [{index}] cannot be toggled"))?;
+                pattern.toggle().map_err(|err| err.to_string())?;
+                state = toggle_label(pattern.get_toggle_state().ok());
+            }
+            "select" => {
+                let pattern: UISelectionItemPattern = element
+                    .get_pattern()
+                    .map_err(|_| format!("element [{index}] cannot be selected"))?;
+                pattern.select().map_err(|err| err.to_string())?;
             }
             "expand" => {
                 let pattern: UIExpandCollapsePattern =
@@ -780,7 +799,11 @@ impl Session {
             other => return Err(format!("unknown action {other}")),
         }
         note_action();
-        Ok(json!({"ran": action, "element": index}))
+        let mut result = json!({"ran": action, "element": index});
+        if let Some(state) = state {
+            result["state"] = json!(state);
+        }
+        Ok(result)
     }
 
     pub fn paste(&mut self, params: &Value) -> Result<Value, String> {
@@ -872,10 +895,13 @@ impl Session {
             }
             let name = action.get("action").and_then(|v| v.as_str()).unwrap_or("");
             let outcome = match name {
-                "click" | "double_click" | "right_click" => {
+                "click" | "double_click" | "triple_click" | "right_click" => {
                     let mut owned = action.clone();
                     if name == "double_click" {
                         owned["count"] = json!(2);
+                    }
+                    if name == "triple_click" {
+                        owned["count"] = json!(3);
                     }
                     if name == "right_click" {
                         owned["button"] = json!("right");
@@ -890,7 +916,15 @@ impl Session {
                 "key" | "press_key" => self.press_key(action),
                 "set_value" => self.set_value(action),
                 "secondary" => self.secondary(action),
+                "toggle" | "select" => {
+                    let mut owned = action.clone();
+                    owned["action"] = json!(name);
+                    self.secondary(&owned)
+                }
                 "paste" => self.paste(action),
+                "wait_for" => self.wait_for(action),
+                "window_state" | "set_window_state" => self.set_window_state(action),
+                "move_window" => self.move_window(action),
                 "focus_window" => {
                     let title = action.get("title").and_then(|v| v.as_str()).unwrap_or("");
                     let windows = self.list_windows(title)?;
@@ -1081,23 +1115,34 @@ impl Session {
     fn guard_input(&self, window_id: i64) -> Result<(), String> {
         crate::guard::prepare()?;
         self.ensure_allowed(window_id)?;
+        windows_ops::ensure_reachable(window_id as isize)?;
+        crate::guard::begin_action();
+        Ok(())
+    }
+    /// Capture and focus only: an elevated window can still be raised and read.
+    fn guard_capture(&self, window_id: i64) -> Result<(), String> {
+        crate::guard::prepare()?;
+        self.ensure_allowed(window_id)?;
         crate::guard::begin_action();
         Ok(())
     }
     fn guard_point(&self, x: i32, y: i32) -> Result<(), String> {
         crate::guard::prepare()?;
+        let hwnd = window_at(x, y);
         if allow_list_on() {
-            ensure_token(&process_image_of(window_at(x, y)))?;
+            ensure_token(&process_image_of(hwnd))?;
         }
+        windows_ops::ensure_reachable(hwnd)?;
         crate::guard::begin_action();
         Ok(())
     }
     fn guard_foreground(&self) -> Result<(), String> {
         crate::guard::prepare()?;
+        let hwnd = unsafe { GetForegroundWindow() }.0 as isize;
         if allow_list_on() {
-            let hwnd = unsafe { GetForegroundWindow() };
-            ensure_token(&process_image_of(hwnd.0 as isize))?;
+            ensure_token(&process_image_of(hwnd))?;
         }
+        windows_ops::ensure_reachable(hwnd)?;
         crate::guard::begin_action();
         Ok(())
     }
@@ -2397,14 +2442,55 @@ fn element_action_labels(element: &UIElement) -> Option<String> {
             .filter(|scrollable| *scrollable)
             .map(|_| pattern.get_horizontal_scroll_percent().unwrap_or(-1.0))
     });
-    action_labels(
+    let rest = action_labels(
         element.get_pattern::<UIInvokePattern>().is_ok(),
         expand,
         collapse,
         element.get_pattern::<UIScrollItemPattern>().is_ok(),
         vertical,
         horizontal,
+    );
+    with_state_actions(
+        element.get_pattern::<UITogglePattern>().is_ok(),
+        element.get_pattern::<UISelectionItemPattern>().is_ok(),
+        rest,
     )
+}
+
+/// Put Toggle and Select in front of the other labels.
+fn with_state_actions(toggle: bool, select: bool, rest: Option<String>) -> Option<String> {
+    let mut labels = Vec::new();
+    if toggle {
+        labels.push("Toggle".to_string());
+    }
+    if select {
+        labels.push("Select".to_string());
+    }
+    labels.extend(rest);
+    if labels.is_empty() {
+        None
+    } else {
+        Some(labels.join(", "))
+    }
+}
+
+fn toggle_label(state: Option<ToggleState>) -> Option<&'static str> {
+    match state? {
+        ToggleState::On => Some("checked"),
+        ToggleState::Off => Some("unchecked"),
+        ToggleState::Indeterminate => Some("mixed"),
+    }
+}
+
+/// A disabled element ignores patterns or fails with an opaque COM error.
+fn ensure_enabled(element: &UIElement, index: usize) -> Result<(), String> {
+    if element.is_enabled().unwrap_or(true) {
+        Ok(())
+    } else {
+        Err(format!(
+            "element [{index}] is disabled; no action was sent. Wait for it to enable, then call get_window_state again."
+        ))
+    }
 }
 
 fn canonical(action: &str) -> Result<String, String> {
@@ -2416,6 +2502,8 @@ fn canonical(action: &str) -> Result<String, String> {
         .to_ascii_lowercase();
     let mapped = match key.as_str() {
         "invoke" => "invoke",
+        "toggle" => "toggle",
+        "select" => "select",
         "expand" => "expand",
         "collapse" => "collapse",
         "raise" => "raise",
@@ -2487,14 +2575,28 @@ fn format_node(element: &UIElement, index: usize, depth: usize) -> (String, bool
     if !name.is_empty() {
         bits.push(format!("\"{name}\""));
     }
+    // A password field never shows its value, even a partial one.
+    let password = element.is_password().unwrap_or(false);
+    if password {
+        bits.push("password".into());
+    }
     if let Ok(pattern) = element.get_pattern::<UIValuePattern>() {
-        if let Ok(value) = pattern.get_value() {
-            if !value.is_empty() {
-                let shown = value.chars().take(120).collect::<String>();
-                bits.push(format!("value={shown:?}"));
+        if !password {
+            if let Ok(value) = pattern.get_value() {
+                if !value.is_empty() {
+                    let shown = value.chars().take(120).collect::<String>();
+                    bits.push(format!("value={shown:?}"));
+                }
             }
         }
         bits.push("editable".into());
+    }
+    if let Some(state) = element
+        .get_pattern::<UITogglePattern>()
+        .ok()
+        .and_then(|pattern| toggle_label(pattern.get_toggle_state().ok()))
+    {
+        bits.push(state.into());
     }
     let focused = element.has_keyboard_focus().unwrap_or(false);
     if focused {
@@ -3389,6 +3491,36 @@ mod policy_tests {
             super::action_labels(false, false, false, false, None, None),
             None
         );
+    }
+
+    #[test]
+    fn toggle_and_select_lead_the_action_labels() {
+        assert_eq!(
+            super::with_state_actions(true, true, Some("Invoke".into())).as_deref(),
+            Some("Toggle, Select, Invoke")
+        );
+        assert_eq!(
+            super::with_state_actions(false, true, None).as_deref(),
+            Some("Select")
+        );
+        assert_eq!(super::with_state_actions(false, false, None), None);
+        assert_eq!(super::canonical("toggle").as_deref(), Ok("toggle"));
+        assert_eq!(super::canonical(" Select ").as_deref(), Ok("select"));
+    }
+
+    #[test]
+    fn toggle_states_read_as_checked_unchecked_or_mixed() {
+        use uiautomation::types::ToggleState;
+        assert_eq!(super::toggle_label(Some(ToggleState::On)), Some("checked"));
+        assert_eq!(
+            super::toggle_label(Some(ToggleState::Off)),
+            Some("unchecked")
+        );
+        assert_eq!(
+            super::toggle_label(Some(ToggleState::Indeterminate)),
+            Some("mixed")
+        );
+        assert_eq!(super::toggle_label(None), None);
     }
 
     #[test]

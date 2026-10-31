@@ -137,7 +137,8 @@ server.registerTool(
       "Pass a region's screenshotId to click, drag, scroll, or move. x and y are physical pixels inside that region, not image pixels: divide image pixels by scale. " +
       "The id must belong to the latest capture, and the window or popup must still be where it was captured. " +
       "After a recent action the host waits about 1 second, and up to 5 seconds more while a progress indicator is visible or the layout is still changing. Do not insert your own delay. The result includes waited_ms. " +
-      "With include_text, a line lists actions=\"Invoke, Expand\" for the secondary actions that element can run.",
+      "With include_text, a line lists actions=\"Invoke, Expand\" for the secondary actions that element can run. " +
+      "Check boxes and toggle buttons show checked, unchecked or mixed. A password field shows password and never its value.",
     inputSchema: {
       ...target,
       include_screenshot: z.boolean().optional(),
@@ -156,8 +157,8 @@ server.registerTool(
       ...point,
       button: z.enum(["left", "right", "middle"]).optional(),
       mouse_button: z.enum(["left", "right", "middle", "l", "r", "m"]).optional(),
-      click_count: z.number().int().min(1).max(2).optional(),
-      count: z.number().int().optional().describe("2 double-clicks."),
+      click_count: z.number().int().min(1).max(3).optional(),
+      count: z.number().int().optional().describe("2 double-clicks, 3 triple-clicks (selects a line or paragraph in most editors)."),
       screenshotId: z.string().min(1).optional(),
     },
   },
@@ -322,7 +323,7 @@ server.registerTool(
 server.registerTool(
   "perform_secondary_action",
   {
-    description: "Run one actions= label from the latest accessibility tree: Invoke, Expand, Collapse, Raise, or Scroll Up, Scroll Down, Scroll Left, Scroll Right. Matching ignores case. Do not guess a label the tree did not list.",
+    description: "Run one actions= label from the latest accessibility tree or find_elements result: Invoke, Toggle, Select, Expand, Collapse, Raise, or Scroll Up, Scroll Down, Scroll Left, Scroll Right. Matching ignores case. Do not guess a label the tree did not list. Toggle returns the new state. A disabled element is refused without sending anything.",
     inputSchema: {
       ...target,
       element_index: z.number().int(),
@@ -330,6 +331,87 @@ server.registerTool(
     },
   },
   async (args) => run("perform_secondary_action", args),
+);
+
+const elementFilter = {
+  name: z.string().optional().describe("Case-insensitive part of the element's accessible name."),
+  role: z.string().optional().describe("Control type such as Button, Edit, CheckBox, ListItem, MenuItem. Case and spaces are ignored."),
+  automation_id: z.string().optional().describe("Exact UI Automation id."),
+};
+
+server.registerTool(
+  "find_elements",
+  {
+    description:
+      "Search one window's accessibility tree by name, role or automation_id instead of reading the whole tree. " +
+      "Walks up to 3000 elements (get_window_state stops at 400) and returns only the matches with their element_index. " +
+      "This replaces the latest accessibility snapshot, so the indices work with click, set_value and perform_secondary_action. " +
+      "complete=false means the window had more elements than were walked.",
+    inputSchema: {
+      window_id: windowId,
+      ...elementFilter,
+      limit: z.number().int().min(1).max(200).optional().describe("Most matches to return. Default 50."),
+    },
+  },
+  async (args) => run("find_elements", args, 30_000),
+);
+
+server.registerTool(
+  "wait_for",
+  {
+    description:
+      "Wait until a window whose title contains window_title appears, or an element matching name/role/automation_id appears in window_id. " +
+      "With gone=true, wait until it disappears instead. Reads only and sends no input. Polls every 250 ms; timeout_ms defaults to 5000 and stops at 30000. " +
+      "Use this after a click that opens a dialog or starts a load instead of a fixed wait. Element matches replace the latest accessibility snapshot. Escape stops the wait.",
+    inputSchema: {
+      window_title: z.string().optional(),
+      window_id: windowId.optional(),
+      ...elementFilter,
+      gone: z.boolean().optional(),
+      timeout_ms: z.number().int().min(0).max(30000).optional(),
+    },
+  },
+  async (args) => run("wait_for", args, 40_000),
+);
+
+server.registerTool(
+  "set_window_state",
+  {
+    description: "Minimize, maximize or restore a window. Follows the same allow-list, idle and Escape rules as other input.",
+    inputSchema: {
+      window_id: windowId,
+      state: z.enum(["minimize", "maximize", "restore"]),
+    },
+  },
+  async (args) => run("set_window_state", args),
+);
+
+server.registerTool(
+  "move_window",
+  {
+    description:
+      "Move or resize a window in physical screen pixels. Omitted values keep the current ones. " +
+      "A maximized or minimized window is restored first. The window must stay at least 100 px on each side and overlap the desktop. Does not bring the window forward.",
+    inputSchema: {
+      window_id: windowId,
+      x: z.number().int().optional(),
+      y: z.number().int().optional(),
+      width: z.number().int().positive().optional(),
+      height: z.number().int().positive().optional(),
+    },
+  },
+  async (args) => run("move_window", args),
+);
+
+server.registerTool(
+  "close_window",
+  {
+    description:
+      "Ask a window to close, like its title-bar X. The app may show a save prompt instead; closed=false then means the window is still open. " +
+      "Windows session processes such as explorer.exe are refused. Not available inside batch.",
+    inputSchema: { window_id: windowId },
+  },
+  async (args) => run("close_window", args, 20_000),
 );
 
 server.registerTool(
@@ -388,7 +470,7 @@ server.registerTool(
   {
     description:
       "Run up to 50 actions in order and stop at the first error. A covered point stops the batch without sending that input; call get_window_state and retry once. " +
-      "Actions: click, double_click, right_click, move, drag, draw, scroll, type, key, set_value, secondary, paste, focus_window, wait. " +
+      "Actions: click, double_click, triple_click, right_click, move, drag, draw, scroll, type, key, set_value, secondary, toggle, select, paste, focus_window, window_state, move_window, wait, wait_for. " +
       "Input waits until the user has been idle, and Escape stops further actions.",
     inputSchema: {
       actions: z.array(z.record(z.string(), z.unknown())).max(50),

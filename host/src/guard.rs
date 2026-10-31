@@ -30,6 +30,8 @@ impl InputLock {
             | "clipboard_read"
             | "overlay_status"
             | "guard_status"
+            | "find_elements"
+            | "wait_for"
             | "ping"
             | "close"
             | "start_audio_recording"

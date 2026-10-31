@@ -3,6 +3,14 @@
 ## Unreleased
 
 - Ship `skills/pointhand/SKILL.md` and a Grok App / Grok CLI setup section in the README.
+- `find_elements` searches a window's accessibility tree by name, role or automation id (up to 3000 elements) and returns only the matches with usable `element_index` values.
+- `wait_for` waits for a window title or an element to appear or disappear (up to 30 seconds, Escape stops it).
+- `set_window_state`, `move_window` and `close_window` manage windows under the same allow-list, idle and Escape rules. `close_window` refuses Windows session processes.
+- `perform_secondary_action` runs `Toggle` and `Select`. Tree lines show `checked`, `unchecked` or `mixed`, and a disabled element is refused before anything is sent.
+- A password field's value no longer appears in the accessibility tree.
+- Input to a window running at a higher integrity level (administrator) is refused with `elevated_target` instead of being dropped silently by Windows.
+- `click` accepts `click_count` 3; `batch` adds `triple_click`, `toggle`, `select`, `window_state`, `move_window` and `wait_for`.
+- These ideas come from Vercel Labs' agent-desktop (Apache-2.0); PointHand reimplements them and copies no code.
 
 ## v0.2.0-alpha.5
 

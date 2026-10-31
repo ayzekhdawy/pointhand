@@ -264,6 +264,11 @@ fn dispatch(session: &mut Session, request: &Request) -> Result<Value, String> {
         "press_key" => session.press_key(params),
         "set_value" => session.set_value(params),
         "perform_secondary_action" => session.secondary(params),
+        "find_elements" => session.find_elements(params),
+        "wait_for" => session.wait_for(params),
+        "set_window_state" => session.set_window_state(params),
+        "move_window" => session.move_window(params),
+        "close_window" => session.close_window(params),
         "paste" => session.paste(params),
         "clipboard_read" => session.clipboard_read(),
         "clipboard_write" => session.clipboard_write(
