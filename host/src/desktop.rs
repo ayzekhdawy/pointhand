@@ -40,8 +40,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_RESTORE, SW_SHOWNORMAL,
 };
 
+mod background;
 mod elements;
 mod windows_ops;
+
+pub(crate) use background::wants_background;
 
 const MAX_NODES: usize = 400;
 const MAX_PASTE_CHARS: usize = 200_000;
@@ -232,9 +235,12 @@ impl Session {
         shot: bool,
         text: bool,
         scale: f32,
+        background: bool,
     ) -> Result<Value, String> {
         self.ensure_allowed(window_id)?;
-        if shot {
+        // A window capture reads that window's own pixels and raises nothing,
+        // so background mode does not wait for the user to stop typing.
+        if shot && !background {
             self.guard_capture(window_id)?;
         }
         let waited_ms = self.settle_before_observation(window_id as isize)?;
@@ -338,6 +344,9 @@ impl Session {
     }
 
     pub fn click(&mut self, params: &Value) -> Result<Value, String> {
+        if wants_background(params) {
+            return self.background_click(params);
+        }
         let hinted = params.get("window_id").and_then(|v| v.as_i64());
         let frame = self.bound_frame(params, hinted)?;
         let (x, y, window_id) = if params
@@ -401,6 +410,9 @@ impl Session {
     }
 
     pub fn move_to(&mut self, params: &Value) -> Result<Value, String> {
+        if wants_background(params) {
+            return self.background_move(params);
+        }
         let hinted = params.get("window_id").and_then(|v| v.as_i64());
         let frame = self.bound_frame(params, hinted)?;
         let (x, y, window_id) = if params
@@ -430,6 +442,9 @@ impl Session {
     }
 
     pub fn drag(&mut self, params: &Value) -> Result<Value, String> {
+        if wants_background(params) {
+            return self.background_drag(params);
+        }
         let hinted = params.get("window_id").and_then(|v| v.as_i64());
         let frame = self.bound_frame(params, hinted)?;
         let x1 = int_key(params, &["x1", "from_x"])?;
@@ -523,6 +538,9 @@ impl Session {
         if !(1..=40).contains(&step) {
             return Err("step must be between 1 and 40".into());
         }
+        if wants_background(params) {
+            return self.background_draw(window_id, &points, step);
+        }
         if let Some(id) = window_id {
             self.guard_input(id)?;
             let info = describe(id as isize).ok_or_else(|| format!("window {id} is not open"))?;
@@ -609,6 +627,9 @@ impl Session {
             .and_then(|v| v.as_i64())
             .unwrap_or(0)
             .clamp(0, 200) as i32;
+        if wants_background(params) {
+            return self.background_strokes(id, &lines, step, settle_ms);
+        }
         self.guard_input(id)?;
         if let Some(refusal) = self.pointer_target(id as isize, lines[0][0].0, lines[0][0].1)? {
             return Ok(refusal);
@@ -636,6 +657,10 @@ impl Session {
     }
 
     pub fn scroll(&mut self, params: &Value) -> Result<Value, String> {
+        if wants_background(params) {
+            let (vertical, horizontal) = scroll_ticks(params)?;
+            return self.background_scroll(params, vertical, horizontal);
+        }
         let hinted = params.get("window_id").and_then(|v| v.as_i64());
         let frame = self.bound_frame(params, hinted)?;
         let (x, y, window_id) = if let Some(frame) = frame {
@@ -653,34 +678,7 @@ impl Session {
             self.guard_point(x, y)?;
         }
         let instant = instant_motion(params)?;
-        let vertical = if params.get("scrollY").is_some() || params.get("scroll_y").is_some() {
-            -wheel_ticks(int_key(params, &["scrollY", "scroll_y"]).unwrap_or(0))
-        } else if params
-            .get("horizontal")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
-            0
-        } else {
-            int_key(params, &["ticks"]).unwrap_or(0)
-        };
-        let horizontal = if params.get("scrollX").is_some() || params.get("scroll_x").is_some() {
-            wheel_ticks(int_key(params, &["scrollX", "scroll_x"]).unwrap_or(0))
-        } else if params
-            .get("horizontal")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
-            int_key(params, &["ticks"]).unwrap_or(0)
-        } else {
-            0
-        };
-        if vertical == 0 && horizontal == 0 {
-            return Err("provide a non-zero scroll delta".into());
-        }
-        if vertical.unsigned_abs() > 100 || horizontal.unsigned_abs() > 100 {
-            return Err("at most 100 wheel ticks per axis per request".into());
-        }
+        let (vertical, horizontal) = scroll_ticks(params)?;
         crate::motion::move_pointer(x, y, instant)?;
         ensure_point_allowed(x, y)?;
         crate::check_running()?;
@@ -696,6 +694,9 @@ impl Session {
             .get("text")
             .and_then(|v| v.as_str())
             .ok_or("missing text")?;
+        if wants_background(params) {
+            return self.background_type(params, text);
+        }
         if let Some(id) = params.get("window_id").and_then(|v| v.as_i64()) {
             self.guard_input(id)?;
             focus(id as isize)?;
@@ -713,6 +714,9 @@ impl Session {
             .or_else(|| params.get("keys"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        if wants_background(params) {
+            return self.background_key(params, chord);
+        }
         if let Some(id) = params.get("window_id").and_then(|v| v.as_i64()) {
             self.guard_input(id)?;
             focus(id as isize)?;
@@ -736,7 +740,9 @@ impl Session {
             .to_string();
         let element = self.cached(index)?;
         ensure_enabled(element, index)?;
-        let _ = element.set_focus();
+        if !wants_background(params) {
+            let _ = element.set_focus();
+        }
         let pattern: UIValuePattern = element
             .get_pattern()
             .map_err(|_| format!("element [{index}] is not editable"))?;
@@ -755,7 +761,9 @@ impl Session {
             .unwrap_or("");
         let element = self.cached(index)?;
         ensure_enabled(element, index)?;
-        let _ = element.set_focus();
+        if !wants_background(params) {
+            let _ = element.set_focus();
+        }
         let mut state = None;
         match canonical(action)?.as_str() {
             "invoke" => {
@@ -786,6 +794,11 @@ impl Session {
                     element.get_pattern().map_err(|err| err.to_string())?;
                 pattern.collapse().map_err(|err| err.to_string())?;
             }
+            "focus" => {
+                element
+                    .set_focus()
+                    .map_err(|_| format!("element [{index}] cannot take focus"))?;
+            }
             "raise" => {
                 let pattern: UIScrollItemPattern =
                     element.get_pattern().map_err(|err| err.to_string())?;
@@ -807,6 +820,9 @@ impl Session {
     }
 
     pub fn paste(&mut self, params: &Value) -> Result<Value, String> {
+        if wants_background(params) {
+            return Err("paste replaces your clipboard and presses Ctrl+V, so it cannot run in background mode. Use set_value, or type_text with background:true.".into());
+        }
         let text = params
             .get("text")
             .and_then(|v| v.as_str())
@@ -882,7 +898,7 @@ impl Session {
         Ok(json!({"launched": target}))
     }
 
-    pub fn batch(&mut self, actions: Value) -> Result<Value, String> {
+    pub fn batch(&mut self, actions: Value, background: Option<bool>) -> Result<Value, String> {
         let list = actions.as_array().ok_or("batch needs an actions array")?;
         if list.len() > 50 {
             return Err("at most 50 actions per batch".into());
@@ -893,6 +909,13 @@ impl Session {
                 results.push(json!({"index":index,"ok":false,"error":error}));
                 break;
             }
+            let mut inherited = None;
+            if let (Some(flag), None) = (background, action.get("background")) {
+                let mut owned = action.clone();
+                owned["background"] = json!(flag);
+                inherited = Some(owned);
+            }
+            let action = inherited.as_ref().unwrap_or(action);
             let name = action.get("action").and_then(|v| v.as_str()).unwrap_or("");
             let outcome = match name {
                 "click" | "double_click" | "triple_click" | "right_click" => {
@@ -1071,7 +1094,11 @@ impl Session {
                 );
             }
         }
-        self.guard_input(self.cache_hwnd as i64)
+        if wants_background(params) {
+            self.guard_background(self.cache_hwnd as i64)
+        } else {
+            self.guard_input(self.cache_hwnd as i64)
+        }
     }
 
     fn cached(&self, index: usize) -> Result<&UIElement, String> {
@@ -2193,6 +2220,39 @@ fn stroke(points: &[(i32, i32)]) -> Result<(), String> {
     outcome.and(release)
 }
 
+/// Wheel ticks per axis from scrollY/scrollX pixels or legacy ticks.
+fn scroll_ticks(params: &Value) -> Result<(i32, i32), String> {
+    let vertical = if params.get("scrollY").is_some() || params.get("scroll_y").is_some() {
+        -wheel_ticks(int_key(params, &["scrollY", "scroll_y"]).unwrap_or(0))
+    } else if params
+        .get("horizontal")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        0
+    } else {
+        int_key(params, &["ticks"]).unwrap_or(0)
+    };
+    let horizontal = if params.get("scrollX").is_some() || params.get("scroll_x").is_some() {
+        wheel_ticks(int_key(params, &["scrollX", "scroll_x"]).unwrap_or(0))
+    } else if params
+        .get("horizontal")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        int_key(params, &["ticks"]).unwrap_or(0)
+    } else {
+        0
+    };
+    if vertical == 0 && horizontal == 0 {
+        return Err("provide a non-zero scroll delta".into());
+    }
+    if vertical.unsigned_abs() > 100 || horizontal.unsigned_abs() > 100 {
+        return Err("at most 100 wheel ticks per axis per request".into());
+    }
+    Ok((vertical, horizontal))
+}
+
 fn wheel_ticks(delta_px: i32) -> i32 {
     if delta_px == 0 {
         return 0;
@@ -2507,6 +2567,7 @@ fn canonical(action: &str) -> Result<String, String> {
         "expand" => "expand",
         "collapse" => "collapse",
         "raise" => "raise",
+        "focus" => "focus",
         "scroll up" => "scroll_up",
         "scroll down" => "scroll_down",
         "scroll left" => "scroll_left",

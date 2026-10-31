@@ -39,7 +39,44 @@ omits the image bytes; call `get_window_state`, then retry once.
 `paste`, `clipboard_read`, `clipboard_write`, `start_audio_recording`,
 `stop_audio_recording`, `batch`, `overlay_status`, `guard_status`,
 `get_system_info`, `draw_strokes`, `emergency_stop`, `find_elements`,
-`wait_for`, `set_window_state`, `move_window`, `close_window`.
+`wait_for`, `set_window_state`, `move_window`, `close_window`, `get_element`.
+
+## Background mode
+
+Background mode lets the agent work in one window while you keep working in
+another. Pass `background: true` on a call, on `batch` (it becomes the default
+for every action), or set `POINTHAND_BACKGROUND=1` to make it the default; an
+explicit `background: false` always wins.
+
+- `set_value` and `perform_secondary_action` run through UI Automation without
+  moving focus. This is the most reliable background path.
+- `click`, `move`, `drag`, `draw`, `draw_shape`, `draw_strokes` and `scroll`
+  post mouse messages to the deepest visible child of the target window under
+  the point. The real pointer does not move, and a covered window still gets
+  the input. The window must not be minimized.
+- `type_text` posts characters to the control that has focus inside the target
+  window's thread; click the field with `background: true` first. `press_key`
+  posts one key without modifiers. Chords such as `ctrl+s` cannot be posted
+  without touching your keyboard and are refused.
+- `paste` is refused because it would replace your clipboard.
+- `get_window_state` with `background: true` captures the window without waiting
+  for you to stop typing.
+
+Every background call needs a target window (`window_id`, an `element_index`, or a
+window `screenshotId`). It skips the idle wait, because nothing physical moves,
+and does not draw the cursor overlay. The allow-list, the elevated-window check,
+the locked-desktop check and physical Escape still apply. Escape stops every
+mutation, including when you press it in your own window.
+
+Posted messages are not proof of delivery. Classic Win32 controls accept them;
+Chromium, Electron and some WinUI surfaces may ignore them. Results report
+`delivery: "posted"`; check the effect with a window screenshot, which reads the
+window's own pixels even while it is covered.
+
+`get_element` reads one element from the latest snapshot: role, name,
+`automation_id`, class, rectangle, enabled, offscreen, focused, value, toggle
+state and runnable actions. A password field never returns its value.
+`perform_secondary_action` also accepts `Focus`.
 
 `emergency_stop` is available in Alpha 2: it interrupts active
 input without waiting for the request queue. Restart the MCP server to resume.
@@ -108,7 +145,7 @@ instead. It refuses Windows session processes such as `explorer.exe`, `dwm.exe`
 and `csrss.exe` by exact name, and it is not available inside `batch`. All three
 use the same allow-list, idle wait and Escape stop as other input.
 
-The idea for these tools comes from Vercel Labs'
+Background mode follows agent-desktop's headless accessibility actions. The idea for these tools comes from Vercel Labs'
 [agent-desktop](https://github.com/vercel-labs/agent-desktop) (Apache-2.0).
 PointHand reimplements them for its own host; no agent-desktop code is copied.
 

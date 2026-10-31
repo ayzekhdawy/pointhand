@@ -67,6 +67,12 @@ server.registerTool("get_system_info", {
 }, async () => run("get_system_info", {}));
 
 const windowId = z.number().int().positive().describe("Window id from list_windows.");
+const background = z.boolean().optional().describe(
+  "Work without touching the user's mouse, keyboard or focus, so they can keep working in another window. " +
+  "Needs a target window. Pointer and key input is posted to that window even when it is covered; it must not be minimized. " +
+  "Classic Win32 controls accept it; Chromium, Electron and some modern apps may ignore it, so verify with get_window_state. " +
+  "Skips the wait for the user to be idle. The allow-list and physical Escape still apply. Default from POINTHAND_BACKGROUND.",
+);
 const window = z.object({ id: z.number().int().positive(), app: z.string().optional(), title: z.string().optional() }).optional();
 const target = { window_id: windowId.optional(), window };
 const point = {
@@ -76,6 +82,7 @@ const point = {
   screenshotId: z.string().min(1).optional().describe("Window, monitor slice, owned popup, or monitor screenshot. x and y are physical pixels inside that region."),
   ...target,
   element_index: z.number().int().optional().describe("Index from the latest accessibility tree. Preferred over x,y."),
+  background,
 };
 
 server.registerTool(
@@ -144,6 +151,7 @@ server.registerTool(
       include_screenshot: z.boolean().optional(),
       include_text: z.boolean().optional(),
       scale: z.number().optional().describe("Longest-edge scale, capped so the image stays under 1568px. Default 0.5."),
+      background: z.boolean().optional().describe("Do not wait for the user to stop typing before a window capture."),
     },
   },
   async (args) => run("get_window_state", args, 30_000),
@@ -173,6 +181,7 @@ server.registerTool(
       ...target,
       points: z.array(z.tuple([z.number().int(), z.number().int()])).min(2),
       step: z.number().int().optional().describe("Maximum pixels between samples. Default 6."),
+      background,
     },
   },
   async (args) => run("draw", args, 60_000),
@@ -196,6 +205,7 @@ server.registerTool(
       sides: z.number().int().optional().describe("Polygon sides or star points (3-24)."),
       ...target,
       step: z.number().int().optional().describe("Maximum pixels between samples. Default 6."),
+      background,
     },
   },
   async (args) => {
@@ -209,7 +219,7 @@ server.registerTool(
         rotation: args.rotation,
         sides: args.sides,
       });
-      return await run("draw", { window_id: args.window_id, window: args.window, points, step: args.step }, 60_000);
+      return await run("draw", { window_id: args.window_id, window: args.window, points, step: args.step, background: args.background }, 60_000);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return { content: [{ type: "text", text: message }], isError: true };
@@ -225,6 +235,7 @@ server.registerTool("draw_strokes", {
     hold_ms: z.number().int().min(0).max(500).optional().describe("Pause after pressing and before releasing each stroke. Raise it for apps that read the cursor late (Illustrator). Default 0."),
     settle_ms: z.number().int().min(0).max(1000).optional().describe("Pause between strokes. Default 3."),
     step: z.number().int().min(0).max(200).optional().describe("Walk the pointer in steps of this many pixels. 0 (default) sends only the end points; use 6-12 for Illustrator."),
+    background,
   },
 }, async args => run("draw_strokes",args,600_000));
 
@@ -264,6 +275,7 @@ server.registerTool(
       to_x: z.number().int(),
       to_y: z.number().int(),
       screenshotId: z.string().min(1).optional(),
+      background: background.describe("Post the drag to window_id in window pixels; screenshotId is not used in background mode."),
     },
   },
   async (args) => run("drag", args),
@@ -290,6 +302,7 @@ server.registerTool(
     inputSchema: {
       text: z.string(),
       ...target,
+      background: background.describe("Post characters to the focused control inside window_id. Click the field with background:true first, or use set_value."),
     },
   },
   async (args) => run("type_text", args),
@@ -302,6 +315,7 @@ server.registerTool(
     inputSchema: {
       key: z.string(),
       ...target,
+      background: background.describe("Post one key without modifiers to the focused control inside window_id. Chords such as ctrl+s need background:false."),
     },
   },
   async (args) => run("press_key", args),
@@ -315,6 +329,7 @@ server.registerTool(
       ...target,
       element_index: z.number().int(),
       value: z.string(),
+      background: z.boolean().optional().describe("Set the value without moving focus or waiting for the user to be idle."),
     },
   },
   async (args) => run("set_value", args),
@@ -323,11 +338,12 @@ server.registerTool(
 server.registerTool(
   "perform_secondary_action",
   {
-    description: "Run one actions= label from the latest accessibility tree or find_elements result: Invoke, Toggle, Select, Expand, Collapse, Raise, or Scroll Up, Scroll Down, Scroll Left, Scroll Right. Matching ignores case. Do not guess a label the tree did not list. Toggle returns the new state. A disabled element is refused without sending anything.",
+    description: "Run one actions= label from the latest accessibility tree or find_elements result: Invoke, Toggle, Select, Expand, Collapse, Raise, or Scroll Up, Scroll Down, Scroll Left, Scroll Right. Focus moves keyboard focus to the element. Matching ignores case. Do not guess a label the tree did not list. Toggle returns the new state. A disabled element is refused without sending anything.",
     inputSchema: {
       ...target,
       element_index: z.number().int(),
       action: z.string(),
+      background: z.boolean().optional().describe("Run the action without moving focus or waiting for the user to be idle."),
     },
   },
   async (args) => run("perform_secondary_action", args),
@@ -354,6 +370,20 @@ server.registerTool(
     },
   },
   async (args) => run("find_elements", args, 30_000),
+);
+
+server.registerTool(
+  "get_element",
+  {
+    description:
+      "Read one element from the latest accessibility snapshot live: role, name, automation_id, class, rectangle, enabled, offscreen, focused, value, toggle state and runnable actions. " +
+      "A password field reports password=true and never its value. Reads only.",
+    inputSchema: {
+      ...target,
+      element_index: z.number().int().min(0),
+    },
+  },
+  async (args) => run("get_element", args),
 );
 
 server.registerTool(
@@ -474,6 +504,7 @@ server.registerTool(
       "Input waits until the user has been idle, and Escape stops further actions.",
     inputSchema: {
       actions: z.array(z.record(z.string(), z.unknown())).max(50),
+      background: z.boolean().optional().describe("Default background flag for every action that does not set its own."),
     },
   },
   async (args) => run("batch", args, 60_000),

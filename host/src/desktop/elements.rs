@@ -7,11 +7,15 @@
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+use uiautomation::patterns::{UITogglePattern, UIValuePattern};
 use uiautomation::{UIElement, UITreeWalker};
 use windows::Win32::Foundation::HWND;
 
 use super::windows_ops::window_param;
-use super::{describe, format_node, top_level_windows, CachedNode, Session};
+use super::{
+    describe, element_action_labels, format_node, toggle_label, top_level_windows, CachedNode,
+    Session,
+};
 
 const FIND_MAX_NODES: usize = 3000;
 const FIND_MAX_DEPTH: usize = 32;
@@ -108,6 +112,65 @@ impl Session {
             "complete": scan.complete,
             "waited_ms": waited_ms,
         }))
+    }
+
+    /// Everything PointHand can read about one cached element, read live now.
+    /// A password field's value is never returned.
+    pub fn get_element(&mut self, params: &Value) -> Result<Value, String> {
+        if let Some(id) = params.get("window_id").and_then(|v| v.as_i64()) {
+            if id != self.cache_hwnd as i64 {
+                return Err(
+                    "element belongs to another window; call get_window_state again".into(),
+                );
+            }
+        }
+        self.ensure_allowed(self.cache_hwnd as i64)?;
+        let index = params
+            .get("element_index")
+            .and_then(|v| v.as_u64())
+            .ok_or("missing element_index")? as usize;
+        let element = self.cached(index)?;
+        let password = element.is_password().unwrap_or(false);
+        let mut row = json!({
+            "element_index": index,
+            "role": element
+                .get_control_type()
+                .map(|kind| format!("{kind:?}"))
+                .unwrap_or_else(|_| "Unknown".into()),
+            "name": element.get_name().unwrap_or_default(),
+            "automation_id": element.get_automation_id().unwrap_or_default(),
+            "class_name": element.get_classname().unwrap_or_default(),
+            "enabled": element.is_enabled().unwrap_or(true),
+            "offscreen": element.is_offscreen().unwrap_or(false),
+            "focused": element.has_keyboard_focus().unwrap_or(false),
+            "password": password,
+        });
+        if let Ok(rect) = element.get_bounding_rectangle() {
+            row["rect"] = json!([
+                rect.get_left(),
+                rect.get_top(),
+                rect.get_right(),
+                rect.get_bottom()
+            ]);
+        }
+        if !password {
+            if let Ok(pattern) = element.get_pattern::<UIValuePattern>() {
+                if let Ok(value) = pattern.get_value() {
+                    row["value"] = json!(value.chars().take(2000).collect::<String>());
+                }
+            }
+        }
+        if let Some(state) = element
+            .get_pattern::<UITogglePattern>()
+            .ok()
+            .and_then(|pattern| toggle_label(pattern.get_toggle_state().ok()))
+        {
+            row["toggle"] = json!(state);
+        }
+        if let Some(actions) = element_action_labels(element) {
+            row["actions"] = json!(actions);
+        }
+        Ok(row)
     }
 
     /// Poll until a window title or an element appears, or with `gone` until it

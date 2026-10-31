@@ -35,11 +35,32 @@ erişilebilirlik ağacı (Windows'ta UI Automation) üzerinden okur ve "ref" den
 | Secure field (parola değeri gizli) | Parola kutusunun değeri ağaçta görünebiliyordu | **Eklendi:** parola alanının değeri yazılmaz, `password` etiketi gösterilir |
 | Integrity boundary (yönetici penceresi) | Girdi sessizce düşüyordu | **Eklendi:** yükseltilmiş pencereye girdi göndermeden açık hata |
 | Actionability (devre dışı öğe) | COM hatası | **Eklendi:** devre dışı öğede `set_value`/eylem açık hatayla reddedilir |
+| Headless ref action (imleç ve odak kullanmadan) | Yok; her işlem imleci ve odağı alıyordu | **Eklendi (2. tur):** arka plan modu, `background: true` / `POINTHAND_BACKGROUND=1` |
+| `get`, `is` (öğe özellikleri) | Yalnız ağaç satırı | **Eklendi (2. tur):** `get_element` |
+| `focus` (öğe) | Yok | **Eklendi (2. tur):** "Focus" eylemi |
+| `hover` | `move` | Arka planda da çalışıyor |
 | `clipboard-*`, `launch`, `list-*` | Var | Var |
 | Bildirimler (`list-notifications` …) | Yok | Ertelendi: Windows bildirim merkezi kararsız, düşük değer |
 | `session`, `trace`, imleç katmanı | PointHand'in kendi katmanı var | Gerek yok |
 | `key-down/up`, `mouse-down/up` | Yok | Bilerek yok: tutulan tuş güvenlik riski (agent-desktop da reddediyor) |
 | Ref kimliği, eski ref tespiti | `element_index` + pencere denetimi | Ertelendi: büyük yeniden yazım gerekir |
+
+## Arka plan modu (2. tur)
+
+İshak'ın en çok istediği özellik: kullanıcı bir pencerede çalışırken ajan başka bir
+pencerede çalışsın. Windows'ta tek bir fare imleci ve tek bir klavye odağı var; gerçek
+fare iki yerde aynı anda olamaz. Bu yüzden arka plan modu imleci hiç kullanmaz:
+
+- Erişilebilirlik eylemleri (`set_value`, `perform_secondary_action`) odağı almadan çalışır.
+- Tıklama, sürükleme, çizim, kaydırma, yazı ve tek tuş pencereye Windows mesajı olarak
+  gönderilir (PostMessage). Pencere başka pencerenin altında kalsa da çalışır; küçültülmüş olmamalı.
+- "Kullanıcı boşta mı" beklemesi atlanır, çünkü fiziksel girdi yok.
+- Korunanlar: izin listesi, yönetici penceresi reddi, kilitli masaüstü denetimi, Escape.
+- Sınır: klasik Win32 uygulamaları mesajları alır; Chrome, Electron ve bazı yeni Windows
+  uygulamaları yok sayabilir. Sonuç `delivery: "posted"` döner, ekran görüntüsüyle doğrulanır.
+- `paste` (pano kullanıcınındır) ve Ctrl gibi değiştirici tuşlu kısayollar arka planda reddedilir.
+
+Kod: `host/src/desktop/background.rs`.
 
 ## Nereye eklendi
 

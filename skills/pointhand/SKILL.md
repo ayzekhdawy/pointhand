@@ -25,7 +25,11 @@ When it is configured as the `pointhand` MCP server, its tools appear as `pointh
 6. **Windows.** `set_window_state` minimizes, maximizes or restores; `move_window` moves or resizes;
    `close_window` asks a window to close (it may show a save prompt; check `closed`).
 7. **Drawing.** `draw` takes freehand strokes, `draw_shape` geometric shapes, and `batch` a sequence of actions in a single call.
-8. **Verify.** Take another `get_window_state` or `screenshot` and confirm the result before reporting success.
+8. **Background mode.** When the user wants to keep working while you work, pass `background: true`
+   (or set it once on `batch`). Prefer `set_value` and `perform_secondary_action`; posted clicks and keys work in
+   classic apps but may be ignored by browsers and Electron apps. The window must stay open (covered is fine),
+   not minimized. Verify every step with `get_window_state` (`background: true`).
+9. **Verify.** Take another `get_window_state` or `screenshot` and confirm the result before reporting success.
 
 ## Safety rules
 

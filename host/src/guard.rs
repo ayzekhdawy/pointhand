@@ -31,6 +31,7 @@ impl InputLock {
             | "overlay_status"
             | "guard_status"
             | "find_elements"
+            | "get_element"
             | "wait_for"
             | "ping"
             | "close"

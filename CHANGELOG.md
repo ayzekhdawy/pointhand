@@ -10,6 +10,8 @@
 - A password field's value no longer appears in the accessibility tree.
 - Input to a window running at a higher integrity level (administrator) is refused with `elevated_target` instead of being dropped silently by Windows.
 - `click` accepts `click_count` 3; `batch` adds `triple_click`, `toggle`, `select`, `window_state`, `move_window` and `wait_for`.
+- Background mode (`background: true`, or `POINTHAND_BACKGROUND=1`): the agent works in one window while the user keeps working in another. Accessibility actions run without moving focus; clicks, drags, drawing, scrolling, typing and single keys are posted to the target window, even when it is covered. The idle wait is skipped; the allow-list and Escape still apply. `paste` and modifier chords are refused in this mode.
+- `get_element` reads one element's live properties; `perform_secondary_action` accepts `Focus`.
 - These ideas come from Vercel Labs' agent-desktop (Apache-2.0); PointHand reimplements them and copies no code.
 
 ## v0.2.0-alpha.5
